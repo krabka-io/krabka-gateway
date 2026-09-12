@@ -1,0 +1,37 @@
+# Per-test wall-clock bound for CI.
+#
+# `period` only warns. nextest prints SLOW against the test name at each 60s
+# tick, so a legitimately slow test stays green and stays visible.
+# `terminate-after` is the kill. Ten periods give a hard bound of 600s, and
+# nextest reports the killed test as TIMEOUT against its own name.
+#
+# The bound catches a hang. It does not police slow tests.
+#
+# CI only. Local runs stay unbounded, so a wrong bound cannot block developers.
+[profile.ci]
+slow-timeout = { period = "60s", terminate-after = 10 }
+
+[profile.ci.junit]
+path = "junit.xml"
+
+[test-groups]
+# Each of these suites boots an in-process broker and binds a listener. Running
+# them together saturates a two-core runner and makes the wall-clock assertions
+# in the dedup and ownership suites fail for load rather than for a defect.
+gateway-broker = { max-threads = 2 }
+
+[[profile.default.overrides]]
+filter = 'package(krabka-gateway) & kind(test)'
+test-group = 'gateway-broker'
+
+[[profile.default.overrides]]
+filter = 'package(krabka-sdk-conformance) & kind(test)'
+test-group = 'gateway-broker'
+
+[[profile.ci.overrides]]
+filter = 'package(krabka-gateway) & kind(test)'
+test-group = 'gateway-broker'
+
+[[profile.ci.overrides]]
+filter = 'package(krabka-sdk-conformance) & kind(test)'
+test-group = 'gateway-broker'

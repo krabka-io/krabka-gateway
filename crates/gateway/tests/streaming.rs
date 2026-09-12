@@ -1,0 +1,450 @@
+//! Streaming Connect handlers: `SendStream` for produce and `Subscribe` for
+//! consume.
+
+use std::{collections::BTreeMap, net::SocketAddr, sync::Arc};
+
+use assert2::check;
+use bytes::Bytes;
+use connectrpc_axum::message::Streaming;
+use krabka_broker::{Broker, BrokerConfig, BrokerHandle};
+use krabka_client_admin::{AdminClient, CreateTopicSpec};
+use krabka_client_consumer::{AutoOffsetReset, Consumer, IsolationLevel};
+use krabka_gateway::{
+    codec::RawCodec, config::GatewayConfig, pb, produce::ProduceCore, state::AppState, streaming,
+};
+use krabka_units::prelude::*;
+use futures_util::StreamExt;
+use tempfile::TempDir;
+
+async fn boot() -> (BrokerHandle, String, TempDir) {
+    let dir = TempDir::new().unwrap();
+    let mut config = BrokerConfig::for_tests(dir.path().to_path_buf());
+    config.classic_group_initial_rebalance_delay = millis(1);
+    let broker = Broker::start(config).await.unwrap();
+    let bootstrap = broker.listen_addr().to_string();
+    (broker, bootstrap, dir)
+}
+
+async fn state_for(bootstrap: &str) -> Arc<AppState> {
+    let produce = ProduceCore::new(bootstrap, "stream", Arc::new(RawCodec), None)
+        .await
+        .unwrap();
+    let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
+    Arc::new(AppState {
+        produce: Arc::new(produce),
+        config: Arc::new(GatewayConfig {
+            bootstrap: bootstrap.to_string(),
+            listen_addr: addr,
+            client_id: "stream".into(),
+            dedup_topic: "__krabka_grpc_dedup".into(),
+            dedup_partitions: 4,
+            dedup_window: hours(1),
+            dedup_ownership_group: "__krabka_gateway_dedup_owners".into(),
+            dedup_txn_id_prefix: "stream-dedup".into(),
+            advertised_addr: "127.0.0.1:0".into(),
+            membership_topic: "__krabka_gateway_membership".into(),
+            tls: None,
+            broker_security: None,
+            authz: None,
+            webhooks: std::collections::HashMap::new(),
+            outbound: Vec::new(),
+            schema_registry_url: None,
+            runtime: krabka_gateway::config::GatewayRuntimeConfig::default(),
+        }),
+        authz: Arc::new(krabka_gateway::authz::GatewayAuthz::new(Arc::new(
+            krabka_authz::AllowAllAuthorizer,
+        ))),
+        codec: Arc::new(RawCodec),
+        queue: Arc::default(),
+    })
+}
+
+/// On-behalf-of identity for the `*_inner` helpers: ANONYMOUS over the unknown
+/// host. The state carries an `AllowAllAuthorizer`, so the value does not
+/// change the decision and every record is allowed. It only satisfies the
+/// signature.
+fn anon() -> (krabka_security::Principal, SocketAddr) {
+    (
+        krabka_security::Principal {
+            name: "ANONYMOUS".into(),
+            auth_method: krabka_security::AuthMethod::Anonymous,
+            groups: vec![],
+        },
+        "0.0.0.0:0".parse().unwrap(),
+    )
+}
+
+fn rec(topic: &str, value: &'static [u8]) -> pb::Record {
+    pb::Record {
+        topic: topic.into(),
+        key: None,
+        body: Some(pb::record::Body::Raw(value.to_vec())),
+        headers: vec![],
+        partition: None,
+        timestamp_ms: None,
+        idempotency_key: None,
+        schema: None,
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn send_stream_produces_all_records() {
+    let (broker, bootstrap, _dir) = boot().await;
+    let mut admin = AdminClient::connect(std::slice::from_ref(&bootstrap))
+        .await
+        .unwrap();
+    admin
+        .create_topics(
+            &[CreateTopicSpec {
+                name: "ss-topic".into(),
+                partitions: 1,
+                replicas: 1,
+                configs: BTreeMap::new(),
+            }],
+            krabka_units::secs(10),
+        )
+        .await
+        .unwrap();
+    let state = state_for(&bootstrap).await;
+
+    let input = futures_util::stream::iter(vec![
+        Ok(pb::SendRequest {
+            records: vec![rec("ss-topic", b"a")],
+            acks: 0,
+        }),
+        Ok(pb::SendRequest {
+            records: vec![rec("ss-topic", b"b")],
+            acks: 0,
+        }),
+    ]);
+    let inbound = Streaming::new(Box::pin(input));
+
+    let (p, h) = anon();
+    let acks: Vec<_> = streaming::send_stream_inner(inbound, state, p, h)
+        .collect()
+        .await;
+    check!(acks.len() == 2);
+    for a in &acks {
+        let ack = a.as_ref().expect("ack ok");
+        check!(
+            ack.results
+                .iter()
+                .map(|result| result.error.is_none())
+                .collect::<Vec<_>>()
+                == vec![true]
+        );
+    }
+
+    let mut consumer = Consumer::builder()
+        .bootstrap(bootstrap.clone())
+        .group_id("ss-reader")
+        .subscribe(vec!["ss-topic".to_string()])
+        .isolation_level(IsolationLevel::ReadCommitted)
+        .auto_offset_reset(AutoOffsetReset::Earliest)
+        .build()
+        .await
+        .unwrap();
+    let mut seen = 0;
+    for _ in 0..10 {
+        seen += consumer
+            .poll(krabka_units::millis(500))
+            .await
+            .unwrap()
+            .len();
+        if seen >= 2 {
+            break;
+        }
+    }
+    check!(seen == 2);
+
+    broker.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn subscribe_streams_cloudevent_headers_then_commits() {
+    let (broker, bootstrap, _dir) = boot().await;
+    let mut admin = AdminClient::connect(std::slice::from_ref(&bootstrap))
+        .await
+        .unwrap();
+    admin
+        .create_topics(
+            &[CreateTopicSpec {
+                name: "sub-topic".into(),
+                partitions: 1,
+                replicas: 1,
+                configs: BTreeMap::new(),
+            }],
+            krabka_units::secs(10),
+        )
+        .await
+        .unwrap();
+    let state = state_for(&bootstrap).await;
+
+    // Produce one record up front.
+    let (prod_principal, _) = anon();
+    krabka_gateway::produce::ProduceCore::new(
+        &bootstrap,
+        "sub-prod",
+        Arc::new(RawCodec),
+        None,
+    )
+    .await
+    .unwrap()
+    .produce(
+        krabka_gateway::types::GatewayRecord {
+            topic: "sub-topic".into(),
+            key: None,
+            value: Bytes::from_static(b"hello"),
+            body_structured: None,
+            headers: vec![
+                ("ce_id".into(), Some(Bytes::from_static(b"event-1"))),
+                ("ce_source".into(), Some(Bytes::from_static(b"/tests"))),
+                (
+                    "ce_type".into(),
+                    Some(Bytes::from_static(b"example.created")),
+                ),
+                ("ce_specversion".into(), Some(Bytes::from_static(b"1.0"))),
+                (
+                    "content-type".into(),
+                    Some(Bytes::from_static(b"text/plain")),
+                ),
+            ],
+            partition: None,
+            timestamp_ms: None,
+            idempotency_key: None,
+        },
+        &prod_principal,
+    )
+    .await
+    .unwrap();
+
+    // Control stream: a Start frame (auto_commit), then stays open until dropped.
+    let start = pb::SubscribeFrame {
+        frame: Some(pb::subscribe_frame::Frame::Start(pb::SubscribeStart {
+            group_id: "sub-group".into(),
+            topics: vec!["sub-topic".into()],
+            auto_commit: true,
+            filter: String::new(),
+        })),
+    };
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<
+        Result<pb::SubscribeFrame, connectrpc_axum::message::ConnectError>,
+    >();
+    tx.send(Ok(start)).unwrap();
+    let inbound = Streaming::new(Box::pin(
+        tokio_stream::wrappers::UnboundedReceiverStream::new(rx),
+    ));
+
+    let (p, h) = anon();
+    let mut out = Box::pin(streaming::subscribe_inner(inbound, state, p, h));
+    let mut got = None;
+    for _ in 0..20 {
+        match tokio::time::timeout(std::time::Duration::from_millis(600), out.next()).await {
+            Ok(Some(Ok(msg))) => {
+                got = Some(msg);
+                break;
+            }
+            Ok(Some(Err(e))) => panic!("subscribe error: {e:?}"),
+            Ok(None) => break,
+            Err(_) => {} // timed out this round; retry the poll
+        }
+    }
+    // The loop above already captured (and broke on) the first record, so this
+    // asserts on the already-received Inbound. Dropping the control stream just
+    // releases the session's resources — the test does not wait to observe the
+    // subscription closing.
+    drop(tx);
+    let msg = got.expect("received an Inbound record");
+    check!((msg.topic.as_str(), msg.value.as_slice()) == ("sub-topic", b"hello".as_slice()));
+    check!(
+        msg.headers
+            == vec![
+                pb::Header {
+                    key: "ce_id".to_string(),
+                    value: Some(b"event-1".to_vec())
+                },
+                pb::Header {
+                    key: "ce_source".to_string(),
+                    value: Some(b"/tests".to_vec())
+                },
+                pb::Header {
+                    key: "ce_type".to_string(),
+                    value: Some(b"example.created".to_vec())
+                },
+                pb::Header {
+                    key: "ce_specversion".to_string(),
+                    value: Some(b"1.0".to_vec())
+                },
+                pb::Header {
+                    key: "content-type".to_string(),
+                    value: Some(b"text/plain".to_vec())
+                },
+            ]
+    );
+
+    broker.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn subscribe_filters_raw_json_through_live_consume_session() {
+    let (broker, bootstrap, _dir) = boot().await;
+    let mut admin = AdminClient::connect(std::slice::from_ref(&bootstrap))
+        .await
+        .unwrap();
+    admin
+        .create_topics(
+            &[CreateTopicSpec {
+                name: "filtered-live".into(),
+                partitions: 1,
+                replicas: 1,
+                configs: BTreeMap::new(),
+            }],
+            krabka_units::secs(10),
+        )
+        .await
+        .unwrap();
+    let state = state_for(&bootstrap).await;
+    let producer = krabka_gateway::produce::ProduceCore::new(
+        &bootstrap,
+        "filtered-live-producer",
+        Arc::new(RawCodec),
+        None,
+    )
+    .await
+    .unwrap();
+    let (principal, host) = anon();
+    for value in [br#"{"kind":"skip"}"#.as_slice(), br#"{"kind":"keep"}"#] {
+        producer
+            .produce(
+                krabka_gateway::types::GatewayRecord {
+                    topic: "filtered-live".into(),
+                    key: None,
+                    value: Bytes::copy_from_slice(value),
+                    body_structured: None,
+                    headers: Vec::new(),
+                    partition: None,
+                    timestamp_ms: None,
+                    idempotency_key: None,
+                },
+                &principal,
+            )
+            .await
+            .unwrap();
+    }
+
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<
+        Result<pb::SubscribeFrame, connectrpc_axum::message::ConnectError>,
+    >();
+    tx.send(Ok(pb::SubscribeFrame {
+        frame: Some(pb::subscribe_frame::Frame::Start(pb::SubscribeStart {
+            group_id: "filtered-live-reader".into(),
+            topics: vec!["filtered-live".into()],
+            auto_commit: true,
+            filter: "kind = 'keep'".into(),
+        })),
+    }))
+    .unwrap();
+    let inbound = Streaming::new(Box::pin(
+        tokio_stream::wrappers::UnboundedReceiverStream::new(rx),
+    ));
+    let mut out = Box::pin(streaming::subscribe_inner(inbound, state, principal, host));
+
+    let message = tokio::time::timeout(std::time::Duration::from_secs(10), out.next())
+        .await
+        .expect("matching record arrives before timeout")
+        .expect("subscription remains open")
+        .expect("subscription succeeds");
+    check!(message.offset == 1);
+    check!(message.value == br#"{"kind":"keep"}"#);
+    drop(tx);
+    broker.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn streaming_wrappers_and_router_build() {
+    use connectrpc_axum::message::{ConnectError as CErr, ConnectRequest};
+
+    let (broker, bootstrap, _dir) = boot().await;
+    let mut admin = AdminClient::connect(std::slice::from_ref(&bootstrap))
+        .await
+        .unwrap();
+    admin
+        .create_topics(
+            &[CreateTopicSpec {
+                name: "wrap-topic".into(),
+                partitions: 1,
+                replicas: 1,
+                configs: BTreeMap::new(),
+            }],
+            krabka_units::secs(10),
+        )
+        .await
+        .unwrap();
+    let state = state_for(&bootstrap).await;
+
+    // Router builds with both streaming methods registered (covers lib::router).
+    let _router = krabka_gateway::router(state.clone());
+
+    // send_stream wrapper → Ok with a StreamBody (covers the wrapper).
+    let send_input = futures_util::stream::iter(vec![Ok::<_, CErr>(pb::SendRequest {
+        records: vec![rec("wrap-topic", b"x")],
+        acks: 0,
+    })]);
+    let send_req = ConnectRequest(Streaming::new(Box::pin(send_input)));
+    let send_resp =
+        streaming::send_stream(axum::Extension(state.clone()), None, None, send_req).await;
+    check!(send_resp.is_ok());
+
+    // subscribe wrapper → Ok (inner stream is lazy; not driven here).
+    let sub_input = futures_util::stream::iter(Vec::<Result<pb::SubscribeFrame, CErr>>::new());
+    let sub_req = ConnectRequest(Streaming::new(Box::pin(sub_input)));
+    let sub_resp = streaming::subscribe(axum::Extension(state.clone()), None, None, sub_req).await;
+    check!(sub_resp.is_ok());
+
+    broker.shutdown().await;
+}
+
+/// Connect proto content-type regression.
+///
+/// A connect-go client posts a unary `application/proto` request and requires
+/// the 200 response to echo that content type. An all-default `SendRequest`,
+/// which has no records, encodes to an empty body, and the `Send` handler
+/// returns 200 without producing. A router without `.build_connect()` replies
+/// `application/json`, which a proto client rejects with
+/// `invalid content-type: "application/json"; expecting "application/proto"`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn send_echoes_proto_content_type() {
+    use axum::{
+        body::Body,
+        http::{Method, Request, header::CONTENT_TYPE},
+    };
+    use tower::ServiceExt as _;
+
+    let (broker, bootstrap, _dir) = boot().await;
+    let state = state_for(&bootstrap).await;
+    let app = krabka_gateway::router(state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/krabka.gateway.v1.Gateway/Send")
+                .header(CONTENT_TYPE, "application/proto")
+                .body(Body::empty())
+                .expect("request builds"),
+        )
+        .await
+        .expect("router responds");
+
+    let status = response.status();
+    let content_type = response
+        .headers()
+        .get(CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default()
+        .to_string();
+    check!(status.is_success());
+    check!(content_type.starts_with("application/proto"));
+
+    broker.shutdown().await;
+}

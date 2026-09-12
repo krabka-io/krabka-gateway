@@ -1,0 +1,28 @@
+# cargo-mutants configuration — https://mutants.rs
+#
+# Checked in so `cargo mutants` runs out of the box, locally and in CI, with the
+# same runner and exclusions used everywhere else. Bazel reaches it through
+# `--@rules_rs_mutants//mutants:config`; without that the sweep enumerates from
+# a synthetic workspace where this file is not in scope, and the exclusions
+# below silently do not exclude.
+
+# Tests run under nextest in every other job, so point cargo-mutants at the same
+# runner. nextest fails fast by default, which is what is wanted when killing
+# mutants.
+test_tool = "nextest"
+profile = "mutants"
+
+# A surviving mutant is often only caught by the slower in-process suites under
+# each crate's tests/ dir. Give every mutant run a generous timeout relative to
+# the unmutated baseline so a legitimately-slower-but-correct run is not
+# misreported as a timeout survivor, with a high floor for the heavier suites.
+timeout_multiplier = 5.0
+minimum_test_timeout = 120
+
+exclude_globs = [
+    # Entrypoint and serve-loop glue: no offline signal.
+    "crates/gateway/src/bin/gateway.rs",
+    "crates/app-sdk/src/bin/conformance_adapter.rs",
+    "crates/sdk-conformance/src/bin/conformance.rs",
+    "crates/sdk-conformance/src/bin/emit_cpp_codec_oracle_vectors.rs",
+]

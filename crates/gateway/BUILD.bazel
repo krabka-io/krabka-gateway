@@ -1,0 +1,39 @@
+load("//bazel:defs.bzl", "crate_binary", "crate_library", "crate_tests")
+
+package(default_visibility = ["//visibility:public"])
+
+# Consumed by `crate.from_cargo` (see //MODULE.bazel).
+exports_files(["Cargo.toml"])
+
+# The gateway contract. `build.rs` compiles it here, and `buf generate` compiles
+# it into the four SDK `gen/` trees under //sdks; both read these same files.
+filegroup(
+    name = "proto",
+    srcs = glob(["proto/**/*.proto"]),
+)
+
+# Driven by tests/jvm_differential.rs, which runs it against a JVM consumer.
+filegroup(
+    name = "test_scripts",
+    srcs = glob(["tests/scripts/*.sh"]),
+)
+
+crate_library(
+    name = "gateway",
+    build_script_data = [":proto"],
+)
+
+crate_binary(
+    name = "krabka-gateway",
+    crate_root = "src/bin/gateway.rs",
+    lib = ":gateway",
+)
+
+crate_tests(
+    lib = "gateway",
+    data = [":test_scripts"],
+    # `jvm_differential` starts a cp-kafka container and drives the JVM consumer
+    # against the gateway. Bazel cannot declare a Docker daemon as an input, so
+    # the suite stays out of a plain `bazel test //...`.
+    manual = ["jvm_differential"],
+)

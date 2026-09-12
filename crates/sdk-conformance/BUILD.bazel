@@ -1,0 +1,35 @@
+load("//bazel:defs.bzl", "crate_binary", "crate_library", "crate_tests")
+
+package(default_visibility = ["//visibility:public"])
+
+# Consumed by `crate.from_cargo` (see //MODULE.bazel).
+exports_files(["Cargo.toml"])
+
+# The vectors every SDK adapter is replayed against. One directory, one version
+# per subdirectory; the runner takes the directory as `--vectors`.
+filegroup(
+    name = "vectors",
+    srcs = glob(["vectors/**/*.json"]),
+)
+
+crate_library(name = "sdk-conformance")
+
+crate_binary(
+    name = "conformance",
+    crate_root = "src/bin/conformance.rs",
+    lib = ":sdk-conformance",
+)
+
+crate_binary(
+    name = "emit_cpp_codec_oracle_vectors",
+    crate_root = "src/bin/emit_cpp_codec_oracle_vectors.rs",
+    lib = ":sdk-conformance",
+)
+
+crate_tests(
+    lib = "sdk-conformance",
+    data = [
+        ":vectors",
+        "//crates/gateway:test_scripts",
+    ],
+)

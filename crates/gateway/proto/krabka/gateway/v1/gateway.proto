@@ -1,0 +1,195 @@
+syntax = "proto3";
+package krabka.gateway.v1;
+
+option go_package = "github.com/krabka-io/krabka-gateway/sdks/go/gen/krabka/gateway/v1;gatewayv1";
+
+service Gateway {
+  rpc Send(SendRequest) returns (SendResponse);
+  rpc SendStream(stream SendRequest) returns (stream SendAck);
+  rpc Subscribe(stream SubscribeFrame) returns (stream Inbound);
+  rpc QueueAcquire(QueueAcquireRequest) returns (QueueAcquireResponse);
+  rpc QueueAcknowledge(QueueAcknowledgeRequest) returns (QueueAcknowledgeResponse);
+  rpc QueueRenew(QueueRenewRequest) returns (QueueRenewResponse);
+}
+
+enum Acks {
+  ACKS_ALL = 0;
+  ACKS_LEADER = 1;
+  ACKS_NONE = 2;
+}
+
+// Schema payload format (mirrors Confluent `schemaType`).
+enum SchemaFormat {
+  SCHEMA_FORMAT_UNSPECIFIED = 0;
+  AVRO = 1;
+  JSON = 2;
+  PROTOBUF = 3;
+}
+
+// Selects the schema to serialize a structured value against. An empty
+// `subject` resolves via TopicNameStrategy (`<topic>-value`); a non-zero
+// `id` pins a registered schema version.
+message SchemaSelector {
+  string subject = 1;
+  int32 id = 2;
+  SchemaFormat format = 3;
+}
+
+// A JSON value the gateway serializes into the bound schema's wire format.
+message StructuredValue {
+  bytes json = 1;
+}
+
+message Record {
+  string topic = 1;
+  optional bytes key = 2;
+  // The value is either pre-serialized opaque bytes (`raw`) or a JSON document
+  // the gateway serializes against `schema` (`structured`).
+  oneof body {
+    bytes raw = 3;
+    StructuredValue structured = 8;
+  }
+  repeated Header headers = 4;
+  optional int32 partition = 5;
+  optional int64 timestamp_ms = 6;
+  optional string idempotency_key = 7;
+  optional SchemaSelector schema = 9;
+}
+
+message SendRequest {
+  repeated Record records = 1;
+  Acks acks = 2;
+}
+
+message ErrorInfo {
+  int32 code = 1;
+  string message = 2;
+  bool retriable = 3;
+}
+
+// Kafka headers are ordered, may repeat a key, and may carry a null value.
+message Header {
+  string key = 1;
+  optional bytes value = 2;
+}
+
+message RecordResult {
+  int32 partition = 1;
+  int64 offset = 2;
+  bool deduplicated = 3;
+  optional ErrorInfo error = 4;
+}
+
+message SendResponse {
+  repeated RecordResult results = 1;
+}
+
+message SendAck {
+  repeated RecordResult results = 1;
+}
+
+message SubscribeStart {
+  string group_id = 1;
+  repeated string topics = 2;
+  bool auto_commit = 3;
+  // A SQL WHERE-fragment (boolean expression) filtering records server-side by
+  // their registry-decoded fields. Empty = deliver all (subject to Read ACL).
+  string filter = 4;
+}
+
+// In explicit mode (`SubscribeStart.auto_commit = false`), `offset` is the
+// delivered record offset being acknowledged. The gateway advances a
+// contiguous per-topic-partition frontier and commits frontier + 1, so an ack
+// above a gap cannot skip an unacknowledged record. Ack frames are ignored when
+// `auto_commit` is true.
+message SubscribeAck {
+  string topic = 1;
+  int32 partition = 2;
+  int64 offset = 3;
+}
+
+message SubscribeFrame {
+  oneof frame {
+    SubscribeStart start = 1;
+    SubscribeAck ack = 2;
+  }
+}
+
+message Inbound {
+  string topic = 1;
+  int32 partition = 2;
+  int64 offset = 3;
+  optional bytes key = 4;
+  bytes value = 5;
+  repeated Header headers = 6;
+  int64 timestamp_ms = 7;
+  // Decoded structured (JSON) view + resolved schema metadata, populated when
+  // the value was Confluent-framed (wired by a later task; absent under
+  // RawCodec).
+  optional StructuredValue structured = 8;
+  optional SchemaSelector schema = 9;
+}
+
+// Acquire work from a KIP-932 share group. Leave `session_id` empty on the
+// first call; subsequent calls reuse the returned `session_id`.
+message QueueAcquireRequest {
+  string group_id = 1;
+  repeated string topics = 2;
+  uint32 max_messages = 3;
+  uint32 wait_ms = 4;
+  string session_id = 5;
+  uint64 lock_duration_ms = 6;
+}
+
+message QueuedMessage {
+  string topic = 1;
+  int32 partition = 2;
+  int64 offset = 3;
+  optional bytes key = 4;
+  optional bytes value = 5;
+  repeated Header headers = 6;
+  int64 timestamp_ms = 7;
+  int32 delivery_count = 8;
+}
+
+message QueueAcquireResponse {
+  string session_id = 1;
+  repeated QueuedMessage messages = 2;
+}
+
+enum QueueAckType {
+  QUEUE_ACK_TYPE_UNSPECIFIED = 0;
+  ACCEPT = 1;
+  RELEASE = 2;
+  REJECT = 3;
+}
+
+message QueueAckEntry {
+  string topic = 1;
+  int32 partition = 2;
+  int64 offset = 3;
+  QueueAckType type = 4;
+}
+
+message QueueAcknowledgeRequest {
+  string session_id = 1;
+  repeated QueueAckEntry entries = 2;
+}
+
+message QueueAckResult {
+  QueueAckEntry entry = 1;
+  optional ErrorInfo error = 2;
+}
+
+message QueueAcknowledgeResponse {
+  repeated QueueAckResult results = 1;
+}
+
+message QueueRenewRequest {
+  string session_id = 1;
+  repeated QueueAckEntry entries = 2;
+}
+
+message QueueRenewResponse {
+  repeated QueueAckResult results = 1;
+}

@@ -1,0 +1,137 @@
+//! Protobuf format: serialize / deserialize / validate.
+//!
+//! This module uses [`protox_parse`] to parse a schema, which turns `.proto`
+//! text into a [`prost_reflect::DescriptorPool`]. It uses
+//! [`prost_reflect::DynamicMessage`] to transcode between JSON and binary.
+//!
+//! After Confluent framing, the wire format carries a message-index prefix
+//! before the raw proto bytes. [`crate::schema::wire::strip_proto_index`] and
+//! [`crate::schema::wire::prepend_proto_index`] handle that prefix.
+//!
+//! # Proto3 JSON encoding note
+//!
+//! The [proto3 JSON mapping](https://protobuf.dev/programming-guides/proto3/#json)
+//! encodes `int64` and `uint64` fields as decimal strings, for example `"1"`
+//! and not `1`, to avoid JavaScript precision loss. A caller that compares
+//! deserialized JSON output must allow for this.
+
+use bytes::Bytes;
+use prost::Message as _;
+use prost_reflect::{
+    DescriptorPool, DynamicMessage, MessageDescriptor, prost_types::FileDescriptorSet,
+};
+use serde::Serialize as _;
+
+use crate::codec::CodecError;
+
+/// Build a [`DescriptorPool`] from raw `.proto` source text and return the
+/// descriptor for the **first** message type in it.
+///
+/// The schema must be self-contained, with no external imports.
+fn first_message_desc(schema: &str) -> Result<MessageDescriptor, CodecError> {
+    let fdp = protox_parse::parse("schema.proto", schema)
+        .map_err(|e| CodecError::Serialize(format!("protobuf parse error: {e}")))?;
+
+    let pool = DescriptorPool::from_file_descriptor_set(FileDescriptorSet { file: vec![fdp] })
+        .map_err(|e| CodecError::Serialize(format!("protobuf descriptor error: {e}")))?;
+
+    pool.all_messages()
+        .next()
+        .ok_or_else(|| CodecError::Serialize("no message type defined in schema".into()))
+}
+
+/// Serialize `json`, a JSON-encoded proto value, into Protobuf binary with the
+/// `.proto` schema in `schema`.
+///
+/// This function uses the first message type in the schema, message-index 0,
+/// which matches the Confluent wire default of `[0]`.
+/// # Errors
+/// Returns an error when configuration is invalid, protocol encoding fails, the broker rejects the request, or transport I/O fails.
+pub fn serialize(schema: &str, json: &[u8]) -> Result<Bytes, CodecError> {
+    let msg_desc = first_message_desc(schema)?;
+
+    let mut de = serde_json::Deserializer::from_slice(json);
+    let dynmsg = DynamicMessage::deserialize(msg_desc, &mut de)
+        .map_err(|e| CodecError::Serialize(format!("JSON->proto deserialize error: {e}")))?;
+    // Consume any trailing whitespace; ignore the error (end() only fails on
+    // trailing non-whitespace, which is rare and non-fatal for our use case).
+    let _ = de.end();
+
+    Ok(Bytes::from(dynmsg.encode_to_vec()))
+}
+
+/// Deserialize Protobuf binary `payload` back to JSON bytes with the `.proto`
+/// schema in `schema`.
+///
+/// This function uses the first message type in the schema, message-index 0.
+/// # Errors
+/// Returns an error when configuration is invalid, protocol encoding fails, the broker rejects the request, or transport I/O fails.
+pub fn deserialize(schema: &str, payload: &[u8]) -> Result<Bytes, CodecError> {
+    let msg_desc = first_message_desc(schema)?;
+
+    let dynmsg = DynamicMessage::decode(msg_desc, payload)
+        .map_err(|e| CodecError::Serialize(format!("proto decode error: {e}")))?;
+
+    let mut buf = Vec::new();
+    let mut ser = serde_json::Serializer::new(&mut buf);
+    dynmsg
+        .serialize(&mut ser)
+        .map_err(|e| CodecError::Serialize(format!("proto->JSON serialize error: {e}")))?;
+
+    Ok(Bytes::from(buf))
+}
+
+/// Validate that `json` round-trips through the Protobuf schema, that is, that
+/// `json -> proto bytes` succeeds without an error.
+///
+/// Returns `Ok(())` when the JSON parses against the schema. Returns
+/// [`CodecError::Validate`] on any parse or encoding failure.
+/// # Errors
+/// Returns an error when configuration is invalid, protocol encoding fails, the broker rejects the request, or transport I/O fails.
+pub fn validate(schema: &str, json: &[u8]) -> Result<(), CodecError> {
+    serialize(schema, json).map(|_| ()).map_err(|e| match e {
+        CodecError::Serialize(msg) => CodecError::Validate(msg),
+        other => other,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const SCHEMA: &str = r#"syntax = "proto3"; message R { int64 id = 1; string name = 2; }"#;
+
+    #[test]
+    fn serialize_produces_proto_bytes() {
+        let bytes = serialize(SCHEMA, br#"{"id":1,"name":"a"}"#).expect("serialize should succeed");
+        // Non-empty proto bytes; field 1 (id=1) encodes as 0x08 0x01,
+        // field 2 (name="a") encodes as 0x12 0x01 0x61.
+        assert2::assert!(!bytes.is_empty());
+    }
+
+    #[test]
+    fn roundtrip_json_to_proto_and_back() {
+        let proto_bytes =
+            serialize(SCHEMA, br#"{"id":1,"name":"a"}"#).expect("serialize should succeed");
+
+        let json_bytes = deserialize(SCHEMA, &proto_bytes).expect("deserialize should succeed");
+        let json: serde_json::Value =
+            serde_json::from_slice(&json_bytes).expect("output should be valid JSON");
+
+        // proto3 JSON encodes int64 as a decimal string.
+        assert2::assert!(json.get("id").and_then(|v| v.as_str()) == Some("1"));
+        assert2::assert!(json.get("name").and_then(|v| v.as_str()) == Some("a"));
+    }
+
+    #[test]
+    fn validation_cases() {
+        for (name, payload, valid) in [
+            ("valid", br#"{"id":42,"name":"hello"}"#.as_slice(), true),
+            ("malformed", b"{not valid json}".as_slice(), false),
+            ("wrong_shape", b"[1,2,3]".as_slice(), false),
+        ] {
+            let result = validate(SCHEMA, payload);
+            assert2::assert!(result.is_ok() == valid, "case {name}");
+        }
+    }
+}

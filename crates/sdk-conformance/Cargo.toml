@@ -1,0 +1,36 @@
+[package]
+name = "krabka-sdk-conformance"
+publish = false
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+description = "JSON-stdio conformance harness for Krabka application SDKs"
+repository = "https://github.com/krabka-io/krabka-gateway"
+homepage = "https://github.com/krabka-io/krabka-gateway"
+documentation = "https://docs.rs/krabka-sdk-conformance"
+readme = "README.md"
+
+[lints]
+workspace = true
+
+[dependencies]
+async-trait = { workspace = true }
+base64 = { workspace = true }
+bytes = { workspace = true }
+clap = { workspace = true, features = ["derive"] }
+krabka-authz = { workspace = true }
+krabka-broker = { workspace = true, features = ["test-helpers"] }
+krabka-client-admin = { workspace = true }
+krabka-gateway = { version = "0.4.0", path = "../gateway" }
+krabka-units = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+tempfile = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["io-std", "io-util", "macros", "net", "process", "rt", "rt-multi-thread", "time"] }
+tokio-util = { workspace = true }
+
+[dev-dependencies]
+assert2 = { workspace = true }

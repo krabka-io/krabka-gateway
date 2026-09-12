@@ -1,0 +1,28 @@
+# Force LF line endings for text files so Windows checkouts don't break
+# byte-sensitive content.
+* text=auto eol=lf
+
+# Explicit rules for files where line endings genuinely matter:
+*.rs       text eol=lf
+*.toml     text eol=lf
+*.json     text eol=lf
+*.yml      text eol=lf
+*.yaml     text eol=lf
+*.sh       text eol=lf
+*.proto    text eol=lf
+gradlew    text eol=lf
+
+# Generated protobuf stubs. `buf generate` rewrites them and CI compares the
+# result byte for byte, so a line-ending rewrite here fails that check.
+sdks/cpp/gen/**   text eol=lf
+sdks/go/gen/**    text eol=lf
+sdks/java/gen/**  text eol=lf
+sdks/ts/gen/**    text eol=lf
+
+# Conformance frame captures, read byte for byte by the C++ codec tests.
+sdks/cpp/test/vectors/*.hex  text eol=lf
+
+# Binary files we shouldn't touch.
+*.jar      binary
+*.png      binary
+*.ico      binary

@@ -1,0 +1,96 @@
+[graph]
+all-features = true
+no-default-features = false
+
+[output]
+feature-depth = 1
+
+[advisories]
+db-path = "~/.cargo/advisory-db"
+db-urls = ["https://github.com/rustsec/advisory-db"]
+yanked = "deny"
+ignore = [
+    # quick-xml DoS advisories (quadratic duplicate-attribute check and
+    # unbounded namespace-declaration allocation). quick-xml enters this graph
+    # only through the S3 XML paths of `krabka-object-store`, whose input is a
+    # response from a configured endpoint. Nothing here parses XML that a
+    # gateway client chose. Drop these once that upstream takes 0.41.
+    "RUSTSEC-2026-0194",
+    "RUSTSEC-2026-0195",
+    # RSA "Marvin" timing side-channel. Pulled in transitively by `picky`
+    # (a hard dependency of the vendored `sspi` Kerberos stack in
+    # `krabka-security`). The GSSAPI path is auth-only over AES keytab keys
+    # and performs no RSA private-key operations (no PKINIT), so the
+    # network-observable timing leak does not apply. The advisory has no
+    # fixed release available.
+    "RUSTSEC-2023-0071",
+    # paste is unmaintained. Pulled in transitively by the pinned DataFusion
+    # revision behind the gateway's `arrow` feature; no fixed release is
+    # available through that revision.
+    "RUSTSEC-2024-0436",
+]
+
+[licenses]
+allow = [
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "MIT",
+    "MIT-0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-DFS-2016",
+    "Unicode-3.0",
+    "MPL-2.0",
+    "Zlib",
+    "CC0-1.0",
+    "bzip2-1.0.6",
+    # webpki-roots ships the Mozilla NSS CA bundle (data, not code) under
+    # CDLA-Permissive-2.0. Pulled in transitively via reqwest + rustls.
+    "CDLA-Permissive-2.0",
+]
+exceptions = [
+    # portpicker is public-domain-equivalent (The Unlicense, OSI-approved and
+    # FSF Free/Libre). Pulled in transitively via the vendored `sspi` crate's
+    # `network_client` feature, which the Kerberos path needs for KDC
+    # communication.
+    { allow = ["Unlicense"], crate = "portpicker" },
+    # Creusot's specification attributes/proc macros are LGPL-2.1-or-later.
+    # They enter the graph only through `krabka-verified`; ordinary cargo
+    # builds use Creusot's dummy macro implementation, so keep this allowance
+    # crate-scoped rather than allowing LGPL globally.
+    { allow = ["LGPL-2.1-or-later"], crate = "creusot-std" },
+    { allow = ["LGPL-2.1-or-later"], crate = "creusot-std-proc" },
+]
+confidence-threshold = 0.93
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+allow-wildcard-paths = true
+highlight = "all"
+deny = []
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = [
+    # DataFusion pin behind the gateway's `arrow` feature, for the subscription
+    # filter evaluator.
+    "https://github.com/apache/datafusion",
+    # The sibling repositories, pinned by revision in [patch.crates-io].
+    "https://github.com/krabka-io/krabka-broker",
+    "https://github.com/krabka-io/krabka-client-rs",
+    "https://github.com/krabka-io/krabka-protocol",
+    "https://github.com/krabka-io/krabka-schema-registry",
+    "https://github.com/krabka-io/krabka-streams-rs",
+]
+
+[[licenses.clarify]]
+name = "cfg_block"
+version = "0.1.1"
+expression = "Apache-2.0"
+license-files = [
+    { path = "LICENSE", hash = 0x0fb72a18 }
+]

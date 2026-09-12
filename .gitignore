@@ -1,0 +1,41 @@
+target/
+**/*.rs.bk
+
+# `/.cargo/config.toml` is TRACKED. It holds the git-fetch setting the runners
+# read. An ignored config file never reaches them, so the setting stops working
+# with nothing to show for it. Do not ignore it.
+
+# Bazel convenience symlinks + local user settings
+/bazel-*
+user.bazelrc
+MODULE.bazel.lock
+.idea/
+.vscode/
+*.iml
+.DS_Store
+
+# Gradle — match any nested subproject, not just sdks/java/
+**/.gradle/
+**/build/
+*.class
+
+# C++ SDK: CMake build trees, one per sanitizer configuration.
+sdks/cpp/build*/
+
+# TypeScript SDK
+sdks/ts/node_modules/
+sdks/ts/dist/
+
+# Go SDK
+sdks/go/bin/
+
+# melange / apko build artifacts
+.melange-cache/
+melange.rsa
+melange.rsa.pub
+packages/
+sbom-*.spdx.json
+
+# Cargo mutant output
+mutants.out
+mutants.out.old

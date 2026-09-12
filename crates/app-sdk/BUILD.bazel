@@ -1,0 +1,23 @@
+load("//bazel:defs.bzl", "crate_library", "crate_tests")
+
+package(default_visibility = ["//visibility:public"])
+
+# Consumed by `crate.from_cargo` (see //MODULE.bazel).
+exports_files(["Cargo.toml"])
+
+# `build.rs` compiles the gateway contract with protox rather than protoc, so
+# the proto sources of //crates/gateway are an input to this crate too.
+crate_library(
+    name = "app-sdk",
+    build_script_data = ["//crates/gateway:proto"],
+)
+
+# The `conformance_adapter` binary is not built here. Cargo gates it behind
+# `required-features = ["conformance-adapter"]`, and the feature set Bazel
+# reads from the Cargo resolution is the default one, which does not include
+# it. Build it with Cargo:
+#
+#     cargo build -p krabka-app-sdk --bin conformance_adapter \
+#         --features conformance-adapter
+
+crate_tests(lib = "app-sdk")

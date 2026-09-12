@@ -1,0 +1,106 @@
+[package]
+name = "krabka-gateway"
+publish = false
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+description = "gRPC / Connect-RPC + HTTP gateway into Krabka (Kafka) topics"
+repository = "https://github.com/krabka-io/krabka-gateway"
+homepage = "https://github.com/krabka-io/krabka-gateway"
+documentation = "https://docs.rs/krabka-gateway"
+readme = "README.md"
+keywords = ["kafka", "grpc", "connectrpc", "gateway", "krabka"]
+categories = ["web-programming::http-server", "network-programming"]
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "krabka-gateway"
+path = "src/bin/gateway.rs"
+
+[dependencies]
+assert2 = { workspace = true }
+krabka-authz = { workspace = true }
+krabka-ids = { workspace = true }
+krabka-telemetry = { workspace = true }
+krabka-client-producer = { workspace = true }
+krabka-client-consumer = { workspace = true }
+krabka-client-admin = { workspace = true }
+krabka-client-streams = { workspace = true, optional = true, features = ["arrow"] }
+krabka-metadata = { workspace = true }
+krabka-units = { workspace = true }
+arc-swap = { workspace = true }
+prometheus-client = { workspace = true }
+connectrpc-axum.workspace = true
+prost.workspace = true
+pbjson.workspace = true
+axum.workspace = true
+bytes.workspace = true
+dashmap.workspace = true
+# `Display`/`From`/`Into` derives for the crate's record-coordinate newtypes
+# (see `src/ids.rs`).
+derive_more = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "net", "macros", "signal", "time", "sync"] }
+tracing.workspace = true
+tracing-subscriber.workspace = true
+clap = { workspace = true, features = ["env", "derive"] }
+anyhow.workspace = true
+thiserror.workspace = true
+async-stream = { workspace = true }
+async-trait = { workspace = true }
+futures-util = { workspace = true }
+uuid = { workspace = true }
+tokio-util = { workspace = true }
+reqwest = { workspace = true }
+krabka-security = { workspace = true }
+krabka-client-core = { workspace = true }
+refined_type.workspace = true
+rustls = { workspace = true }
+tokio-rustls = { workspace = true }
+hyper = { workspace = true, features = ["server", "http1", "http2"] }
+hyper-util = { workspace = true, features = ["server-auto", "tokio"] }
+tower = { workspace = true, features = ["util"] }
+hmac = { workspace = true }
+sha2 = { workspace = true }
+subtle = { workspace = true }
+jsonpath-rust = { workspace = true }
+toml = { workspace = true }
+hex = { workspace = true }
+base64 = { workspace = true }
+# Schema Registry codec deps
+apache-avro = { workspace = true }
+prost-reflect = { workspace = true, features = ["serde"] }
+protox-parse = { workspace = true }
+url = { workspace = true }
+jsonschema = { workspace = true }
+arrow = { workspace = true, optional = true }
+datafusion = { workspace = true, optional = true }
+
+[features]
+default = ["arrow"]
+arrow = ["dep:arrow", "dep:krabka-client-streams", "dep:datafusion"]
+
+[build-dependencies]
+connectrpc-axum-build = { workspace = true }
+protoc-bin-vendored = { workspace = true }
+
+[dev-dependencies]
+krabka-broker = { workspace = true, features = ["test-helpers"] }
+temp-env = { workspace = true }
+# Raw Fetch + v2 RecordBatch decode in tests/outbound.rs to read the DLQ
+# record's `x-krabka-dlq-source` header (the group Consumer drops headers).
+krabka-client-core = { workspace = true }
+krabka-protocol = { workspace = true }
+tempfile.workspace = true
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "time", "sync"] }
+# `UnboundedReceiverStream` to drive the Subscribe control stream in tests/streaming.rs.
+tokio-stream = { workspace = true }
+# `ServiceExt::oneshot` to drive the health router in tests/wire.rs.
+tower = { workspace = true, features = ["util"] }
+# `CancellationToken` to drive run_ownership in tests/integration_dedup.rs.
+tokio-util = { workspace = true }
