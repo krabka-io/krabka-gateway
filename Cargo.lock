@@ -3915,7 +3915,7 @@ dependencies = [
  "krabka-records-legacy",
  "krabka-remote-storage",
  "krabka-remote-storage-topic",
- "krabka-schema-serde 0.4.0 (git+https://github.com/krabka-io/krabka-schema-registry?rev=ee9c3933fb1d71735846e7e5e33ea6ab3a694dc5)",
+ "krabka-schema-serde",
  "krabka-security",
  "krabka-telemetry",
  "krabka-throttle",
@@ -4047,7 +4047,7 @@ dependencies = [
 [[package]]
 name = "krabka-client-streams"
 version = "0.4.0"
-source = "git+https://github.com/krabka-io/krabka-streams-rs?rev=bd1f360#bd1f360da887f01d0cb89bce0dc2c2aceee9ceb8"
+source = "git+https://github.com/krabka-io/krabka-streams-rs?rev=375faae45e895ca2afc0622904994a8538fc3593#375faae45e895ca2afc0622904994a8538fc3593"
 dependencies = [
  "arrow",
  "async-trait",
@@ -4057,7 +4057,7 @@ dependencies = [
  "krabka-client-core",
  "krabka-client-producer",
  "krabka-protocol",
- "krabka-schema-serde 0.4.0 (git+https://github.com/krabka-io/krabka-streams-rs?rev=bd1f360)",
+ "krabka-schema-serde",
  "krabka-units",
  "pollster",
  "refined_type",
@@ -4356,26 +4356,6 @@ dependencies = [
  "tokio-util",
  "tracing",
  "uuid",
-]
-
-[[package]]
-name = "krabka-schema-serde"
-version = "0.4.0"
-source = "git+https://github.com/krabka-io/krabka-streams-rs?rev=bd1f360#bd1f360da887f01d0cb89bce0dc2c2aceee9ceb8"
-dependencies = [
- "apache-avro",
- "assert2",
- "bytes",
- "jsonschema",
- "krabka-units",
- "prost 0.14.4",
- "prost-reflect",
- "reqwest 0.13.5",
- "schemars",
- "serde",
- "serde_json",
- "thiserror 2.0.20",
- "tokio",
 ]
 
 [[package]]

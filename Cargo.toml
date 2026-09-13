@@ -140,7 +140,7 @@ krabka-remote-storage-topic = { git = "https://github.com/krabka-io/krabka-broke
 krabka-telemetry = { git = "https://github.com/krabka-io/krabka-broker", rev = "32dd555ec1b7bf9d82b4b7bcdb0c9332f7029617" }
 krabka-throttle = { git = "https://github.com/krabka-io/krabka-broker", rev = "32dd555ec1b7bf9d82b4b7bcdb0c9332f7029617" }
 krabka-verified = { git = "https://github.com/krabka-io/krabka-broker", rev = "32dd555ec1b7bf9d82b4b7bcdb0c9332f7029617" }
-krabka-client-streams = { git = "https://github.com/krabka-io/krabka-streams-rs", rev = "bd1f360" }
+krabka-client-streams = { git = "https://github.com/krabka-io/krabka-streams-rs", rev = "375faae45e895ca2afc0622904994a8538fc3593" }
 # Resolved from krabka-schema-registry rather than krabka-streams-rs: the two
 # repos ship diverged copies of this crate, and `krabka-broker`'s schema
 # validation needs the registry's API (`format::validate`,
