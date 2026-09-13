@@ -17,7 +17,7 @@ load("@rules_rs_mutants//mutants:cargo_mutants_test.bzl", "cargo_mutants_test")
 load("@rules_rust//rust:defs.bzl", "rust_doc", "rust_doc_test", "rust_proc_macro")
 load("//tools/lint:linters.bzl", "clippy_test")
 
-# `[workspace.lints.rust] unsafe_code = "forbid"`. rules_rs 0.0.106 does not
+# `[workspace.lints.rust] unsafe_code = "forbid"`. rules_rs 0.0.110 does not
 # yet plumb Cargo lint tables into the Bazel build, and this is the one lint
 # in that table whose guarantee must not lapse under a second build system.
 # The clippy tables stay a Cargo-side gate: clippy runs as an aspect here, not
