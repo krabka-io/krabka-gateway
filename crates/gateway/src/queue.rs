@@ -12,6 +12,7 @@ use std::{
 
 use axum::Extension;
 use connectrpc_axum::message::{ConnectError, ConnectRequest, ConnectResponse};
+use dashmap::DashMap;
 use krabka_authz::AuthorizationResult;
 use krabka_client_consumer::{
     ShareAckMode, ShareAckType, ShareAcquireMode, ShareConsumer, ShareConsumerRecord,
@@ -19,7 +20,6 @@ use krabka_client_consumer::{
 use krabka_metadata::{AclOperation, ResourceType};
 use krabka_security::Principal;
 use krabka_units::{Time, convert::TimeExt};
-use dashmap::DashMap;
 use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore};
 
 use crate::{

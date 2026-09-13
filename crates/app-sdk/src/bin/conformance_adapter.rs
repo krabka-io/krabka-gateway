@@ -2,15 +2,15 @@
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use bytes::Bytes;
+use futures_util::StreamExt as _;
 use krabka_app_sdk::{
-    AcquireOptions, CloudEvent, KrabkaClient, KrabkaError, Filter, PublishOptions, QueueAckEntry,
+    AcquireOptions, CloudEvent, Filter, KrabkaClient, KrabkaError, PublishOptions, QueueAckEntry,
     QueueAckType, QueueRenewEntry,
 };
 use krabka_sdk_conformance::protocol::{
     AdapterError, CONTRACT_MAJOR, CONTRACT_MINOR_QUEUE_RPC, Command, ErrorKind, Header, Message,
     Response,
 };
-use futures_util::StreamExt as _;
 use serde_json::json;
 use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader, BufWriter};
 

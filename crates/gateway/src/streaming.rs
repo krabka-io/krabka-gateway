@@ -11,10 +11,10 @@ use axum::Extension;
 use connectrpc_axum::message::{
     ConnectError, ConnectRequest, ConnectResponse, StreamBody, Streaming,
 };
+use futures_util::{Stream, StreamExt};
 use krabka_authz::AuthorizationResult;
 use krabka_metadata::{AclOperation, ResourceType};
 use krabka_security::Principal;
-use futures_util::{Stream, StreamExt};
 
 use crate::{
     codec::{SchemaFormat, SchemaMeta},

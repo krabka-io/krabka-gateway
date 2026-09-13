@@ -3,8 +3,8 @@
 //! The loader checks the target URL's scheme and host against an allow-list,
 //! which guards against SSRF. It also parses any filter `JSONPath` once.
 
-use krabka_units::prelude::*;
 use jsonpath_rust::parser::model::JpQuery;
+use krabka_units::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::config_value::{PositiveU32, positive_time};

@@ -9,8 +9,8 @@
 
 use std::time::Instant;
 
-use krabka_units::prelude::*;
 use dashmap::DashMap;
+use krabka_units::prelude::*;
 use serde::{Deserialize, Serialize};
 use url::Url;
 
