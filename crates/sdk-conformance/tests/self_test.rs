@@ -52,7 +52,15 @@ fn workspace_root() -> std::path::PathBuf {
         .to_path_buf()
 }
 
+/// The Rust conformance adapter binary.
+///
+/// Bazel builds the adapter as a declared input and names it in
+/// `KRABKA_RUST_CONFORMANCE_ADAPTER`. A Cargo run sets no such variable, so
+/// the test builds the adapter with `cargo build`.
 fn rust_conformance_adapter_bin() -> std::path::PathBuf {
+    if let Some(adapter) = std::env::var_os("KRABKA_RUST_CONFORMANCE_ADAPTER") {
+        return std::path::PathBuf::from(adapter);
+    }
     let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
     let output = std::process::Command::new(cargo)
         .current_dir(workspace_root())

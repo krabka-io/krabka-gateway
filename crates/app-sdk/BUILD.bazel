@@ -1,4 +1,4 @@
-load("//bazel:defs.bzl", "crate_library", "crate_tests")
+load("//bazel:defs.bzl", "crate_binary", "crate_library", "crate_tests")
 
 package(default_visibility = ["//visibility:public"])
 
@@ -6,18 +6,25 @@ package(default_visibility = ["//visibility:public"])
 exports_files(["Cargo.toml"])
 
 # `build.rs` compiles the gateway contract with protox rather than protoc, so
-# the proto sources of //crates/gateway are an input to this crate too.
+# the proto sources of //crates/gateway are an input to this crate too. Bazel
+# runs the build script outside the crate directory, where the relative path
+# that Cargo uses does not resolve. The environment gives it the directory in
+# the execution root instead.
 crate_library(
     name = "app-sdk",
     build_script_data = ["//crates/gateway:proto"],
+    build_script_env = {"KRABKA_GATEWAY_PROTO_DIR": "$${pwd}/crates/gateway/proto"},
 )
 
-# The `conformance_adapter` binary is not built here. Cargo gates it behind
-# `required-features = ["conformance-adapter"]`, and the feature set Bazel
-# reads from the Cargo resolution is the default one, which does not include
-# it. Build it with Cargo:
-#
-#     cargo build -p krabka-app-sdk --bin conformance_adapter \
-#         --features conformance-adapter
+# The Rust adapter that the conformance runner drives. Cargo builds it only
+# with the `conformance-adapter` feature, and the Cargo resolution that Bazel
+# reads has only the default features. So the dependency that the feature adds
+# is named here. //crates/sdk-conformance:self_test_test runs this binary.
+crate_binary(
+    name = "conformance_adapter",
+    crate_root = "src/bin/conformance_adapter.rs",
+    lib = ":app-sdk",
+    deps = ["//crates/sdk-conformance"],
+)
 
 crate_tests(lib = "app-sdk")

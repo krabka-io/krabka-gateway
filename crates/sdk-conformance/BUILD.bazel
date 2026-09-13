@@ -27,9 +27,22 @@ crate_binary(
 )
 
 crate_tests(
-    lib = "sdk-conformance",
     data = [
+        ":conformance",
         ":vectors",
+        "//crates/app-sdk:conformance_adapter",
         "//crates/gateway:test_scripts",
     ],
+    # `self_test` runs the Bazel-built Rust adapter. Under Cargo it builds the
+    # adapter with `cargo build` instead.
+    env = {"KRABKA_RUST_CONFORMANCE_ADAPTER": "$(rootpath //crates/app-sdk:conformance_adapter)"},
+    lib = "sdk-conformance",
+    # `self_test` finds the runner through the variable that Cargo exports for
+    # a `[[bin]]` in the same package, and the vectors and scripts through
+    # `CARGO_MANIFEST_DIR`. Bazel sets neither. These values are relative to
+    # the runfiles directory, where a test starts.
+    rustc_env = {
+        "CARGO_BIN_EXE_conformance": "$(rootpath :conformance)",
+        "CARGO_MANIFEST_DIR": "crates/sdk-conformance",
+    },
 )

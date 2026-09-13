@@ -82,12 +82,15 @@ arrow = { workspace = true, optional = true }
 datafusion = { workspace = true, optional = true }
 
 [features]
-default = ["arrow"]
+default = ["arrow", "vendored-protoc"]
 arrow = ["dep:arrow", "dep:krabka-client-streams", "dep:datafusion"]
+# `build.rs` runs the `protoc` from `protoc-bin-vendored` when `PROTOC` is not
+# set. Bazel sets `PROTOC` and turns this feature off (see //bazel:defs.bzl).
+vendored-protoc = ["dep:protoc-bin-vendored"]
 
 [build-dependencies]
 connectrpc-axum-build = { workspace = true }
-protoc-bin-vendored = { workspace = true }
+protoc-bin-vendored = { workspace = true, optional = true }
 
 [dev-dependencies]
 krabka-broker = { workspace = true, features = ["test-helpers"] }

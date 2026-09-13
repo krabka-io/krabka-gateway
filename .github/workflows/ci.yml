@@ -1,106 +1,133 @@
 name: ci
 
 # The Rust half of this repository: the gateway, the Rust application SDK and
-# the conformance runner. The four other SDKs have a workflow each, because
-# each needs a toolchain this job does not install.
-#
-# Cargo is the gate here. The Bazel targets under //crates are checked in and
-# describe the same build, but they are not yet gated: they were written
-# without a Bazel run to check them against. Make `bazel test //...` the gate
-# once one run has proved it.
+# the conformance runner. Bazel builds and tests it, as in the sibling
+# repositories. The four other SDKs have a workflow each, because each needs a
+# toolchain that this workflow does not install.
 
 on:
   pull_request:
   push:
     branches: [main]
+  schedule:
+    # Nightly, 05:00 UTC: the mutation sweep.
+    - cron: "0 5 * * *"
   workflow_dispatch:
 
 permissions:
   contents: read
+  # The Aspect CLI uploads test logs and BEP through the Actions artifact API.
+  # GitHub gives the OIDC token for that API only to jobs that hold this
+  # permission. Without it, the CLI skips the uploads and says so on every job.
+  id-token: write
 
+# Cancel superseded PR runs. Let pushes to main run to completion.
 concurrency:
-  group: ci-${{ github.ref }}
+  group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
-env:
-  RUST_TOOLCHAIN: "1.97.1"
-  NEXTEST_VERSION: "cargo-nextest@0.9.143"
-  LLVM_COV_VERSION: "cargo-llvm-cov@0.8.7"
-
 jobs:
-  # Format, lint and the unit tests, on the platforms the gateway is built for.
-  rust:
-    name: rust · ${{ matrix.os }}
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 60
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest]
+  # Build, test, lint and format. The Aspect CLI narrows each step to the
+  # targets that the change touched. `bazel build //...` and
+  # `bazel test //...` do the same work without the CLI.
+  ci:
+    name: build · test · lint · format
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: ${{ env.RUST_TOOLCHAIN }}
-          components: clippy
-      - uses: Swatinem/rust-cache@v2
+          # Change detection needs the merge base, not only the tip.
+          fetch-depth: 0
+      - uses: aspect-build/setup-aspect@2306377a61c45954ab2df7c7311698b109364352 # v2026.26.9
         with:
-          key: ${{ matrix.os }}-rust
-      - uses: taiki-e/install-action@v2
-        with:
-          # Pinned, not `@latest`. A moving test runner is a silent change to
-          # how the suite is selected and retried.
-          tool: ${{ env.NEXTEST_VERSION }}
-      # rustfmt runs on nightly so `format_code_in_doc_comments` and
-      # `imports_granularity` (both unstable, both set in rustfmt.toml) apply.
-      # Stable rustfmt skips them without failing, which is worse than not
-      # running it. Once, on Linux.
-      - name: Install nightly rustfmt
-        if: matrix.os == 'ubuntu-latest'
-        run: rustup toolchain install nightly --profile minimal --component rustfmt
-      - name: Format
-        if: matrix.os == 'ubuntu-latest'
-        run: cargo +nightly fmt --all -- --check
-      - name: Clippy
-        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
-      # Unit tests only. The `tests/*.rs` suites boot an in-process broker and
-      # bind listeners; they run in the `integration` job below, on Linux.
-      - name: Unit tests
-        run: cargo nextest run --workspace --profile ci --lib --bins
-      - name: Doctests
-        if: matrix.os == 'ubuntu-latest'
-        run: cargo test --workspace --doc
+          aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
+          bazelisk-cache: true
+          disk-cache: ${{ github.workflow }}
+          repository-cache: true
+      # `--severity` defaults to `auto`. The CLI resolves that to `fail` on CI
+      # and to `info` elsewhere, so this step gates here and only reports
+      # locally.
+      - name: format
+        run: aspect format
+      # `aspect lint` reads the `rules_lint_machine` output group. The clippy
+      # aspect from aspect_rules_lint_rust writes it (see
+      # //tools/lint/linters.bzl). `bazel test //...` gates on the same aspect
+      # through the `*_clippy` targets.
+      - name: lint
+        run: aspect lint --aspect=//tools/lint:linters.bzl%clippy
+      - name: build
+        run: aspect build //...
+      - name: test
+        run: aspect test //...
 
-  # The gateway's own logic lives in `src/` but is driven almost entirely from
-  # the `tests/` binaries: unary Send, group consume and commit, single-owner
-  # dedup, webhook forwarding and the schema codecs, all against an in-process
-  # Rust broker. A `--lib --bins` walk never reaches them.
-  integration:
-    name: gateway integration
+  # LCOV over the first-party crates. A separate job, because instrumented
+  # binaries are a different build and would only evict the `ci` job's cache.
+  coverage:
+    name: coverage
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v7
+      - uses: aspect-build/setup-aspect@2306377a61c45954ab2df7c7311698b109364352 # v2026.26.9
+        with:
+          aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
+          bazelisk-cache: true
+          disk-cache: ${{ github.workflow }}-coverage
+          repository-cache: true
+      - run: bazel coverage //crates/...
+      - uses: codecov/codecov-action@v7
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: bazel-out/_coverage/_coverage_report.dat
+          disable_search: true
+          fail_ci_if_error: false
+
+  # rustdoc for every crate, kept as an artifact. The `ci` job builds these
+  # too, but `aspect build` builds only the crates that a change touched.
+  docs:
+    name: docgen
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+      - uses: aspect-build/setup-aspect@2306377a61c45954ab2df7c7311698b109364352 # v2026.26.9
+        with:
+          aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
+          bazelisk-cache: true
+          disk-cache: ${{ github.workflow }}-docs
+          repository-cache: true
+      - run: bazel build $(bazel query 'kind("rust_doc rule", //crates/...)')
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rustdoc
+          path: bazel-bin/crates/**/*.rustdoc
+          if-no-files-found: error
+
+  # `jvm_differential` starts a cp-kafka container and drives the JVM console
+  # consumer against the gateway. It is `manual` in //crates/gateway, so
+  # `bazel test //...` does not run it. This job names it.
+  jvm-differential:
+    name: gateway JVM differential
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@master
+      - uses: aspect-build/setup-aspect@2306377a61c45954ab2df7c7311698b109364352 # v2026.26.9
         with:
-          toolchain: ${{ env.RUST_TOOLCHAIN }}
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: gateway-integration
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: ${{ env.LLVM_COV_VERSION }},${{ env.NEXTEST_VERSION }}
-      - name: Integration coverage
-        run: |
-          mkdir -p coverage
-          cargo llvm-cov nextest -p krabka-gateway -p krabka-sdk-conformance \
-            --profile ci --tests \
-            --lcov --output-path coverage/integration.lcov
-      # Pull the image up front so a registry problem fails this one step with
-      # Docker's own message. Without the preload the first `docker run` in the
-      # differential test pays the pull, and a stalled pull sits inside the test
-      # until the job timeout. The tag mirrors `IMAGE` in
-      # crates/gateway/tests/jvm_differential.rs. Keep them in lockstep.
+          aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
+          bazelisk-cache: true
+          disk-cache: ${{ github.workflow }}-jvm
+          repository-cache: true
+      # Pull the image first, so that a registry problem fails this one step
+      # with Docker's own message. Without the pull, the first `docker run` in
+      # the test pays for it, and a stalled pull waits inside the test until
+      # the job times out. The tag is `IMAGE` in
+      # crates/gateway/tests/jvm_differential.rs. Change both together.
       - name: Preload Docker images
         timeout-minutes: 5
         run: |
@@ -110,40 +137,84 @@ jobs:
             exit 1
           }
       - name: JVM differential
-        run: cargo nextest run --locked -p krabka-gateway --profile ci --test jvm_differential --run-ignored only
-      - uses: codecov/codecov-action@v7
-        with:
-          token: ${{ secrets.CODECOV_TOKEN }}
-          files: coverage/integration.lcov
-          disable_search: true
-          flags: gateway-integration
-          fail_ci_if_error: false
+        run: |
+          bazel test //crates/gateway:jvm_differential_test \
+            --test_arg=--ignored \
+            --test_output=streamed
 
-  # The Rust application SDK against the same vectors every other SDK is
-  # replayed against, first offline and then against a live in-process gateway.
+  # The Rust application SDK against the vectors that every other SDK runs,
+  # first offline and then against a live in-process gateway.
   sdk-rust:
     name: sdk-rust conformance
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@master
+      - uses: aspect-build/setup-aspect@2306377a61c45954ab2df7c7311698b109364352 # v2026.26.9
         with:
-          toolchain: ${{ env.RUST_TOOLCHAIN }}
-          components: clippy
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: sdk-rust
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: ${{ env.NEXTEST_VERSION }}
-      - name: Verify the Rust SDK crates
-        run: |
-          cargo clippy -p krabka-sdk-conformance -p krabka-app-sdk --all-targets --features krabka-app-sdk/conformance-adapter -- -D warnings
-          cargo nextest run -p krabka-sdk-conformance -p krabka-app-sdk --profile ci --features krabka-app-sdk/conformance-adapter
-      - name: Build the Rust conformance adapter
-        run: cargo build -p krabka-app-sdk --bin conformance_adapter --features conformance-adapter
+          aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
+          bazelisk-cache: true
+          disk-cache: ${{ github.workflow }}-sdk-rust
+          repository-cache: true
+      - name: Build the runner and the Rust adapter
+        run: bazel build //crates/sdk-conformance:conformance //crates/app-sdk:conformance_adapter
       - name: Run SDK conformance
-        run: cargo run -p krabka-sdk-conformance --bin conformance -- --adapter target/debug/conformance_adapter --vectors crates/sdk-conformance/vectors/v1
-      - name: Run live-compatible SDK conformance
-        run: cargo run -p krabka-sdk-conformance --bin conformance -- --adapter target/debug/conformance_adapter --vectors crates/sdk-conformance/vectors/v1 --live-substrate --live-compatible-only
+        run: |
+          set -euo pipefail
+          runner="$(bazel cquery --output=files //crates/sdk-conformance:conformance)"
+          adapter="$(bazel cquery --output=files //crates/app-sdk:conformance_adapter)"
+          "${runner}" --adapter "${adapter}" --vectors crates/sdk-conformance/vectors/v1
+          "${runner}" --adapter "${adapter}" --vectors crates/sdk-conformance/vectors/v1 \
+            --live-substrate --live-compatible-only
+
+  # A mutation sweep rebuilds and reruns a crate's tests once per mutant, so it
+  # is far too slow to gate a pull request. One job per crate, so each one has
+  # its own bound and reports its own result.
+  #
+  # `continue-on-error`: survivors are the expected state. The job produces a
+  # list to read. Make it blocking when the score is worth defending.
+  mutants-select:
+    name: select mutants targets
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    outputs:
+      crates: ${{ steps.select.outputs.crates }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: aspect-build/setup-aspect@2306377a61c45954ab2df7c7311698b109364352 # v2026.26.9
+        with:
+          aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
+          bazelisk-cache: true
+          disk-cache: ${{ github.workflow }}-mutants
+          repository-cache: true
+      - id: select
+        run: |
+          set -euo pipefail
+          crates="$(
+            bazel query 'kind("cargo_mutants_test rule", //crates/...)' |
+              jq -R -s -c 'split("\n") | map(select(length > 0)) |
+                map({target: ., name: (. | split("/")[3] | split(":")[0])})'
+          )"
+          echo "crates=${crates}" >>"${GITHUB_OUTPUT}"
+          echo "Selected: ${crates}"
+  mutants:
+    name: mutants · ${{ matrix.crate.name }}
+    needs: mutants-select
+    continue-on-error: true
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        crate: ${{ fromJSON(needs.mutants-select.outputs.crates) }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: aspect-build/setup-aspect@2306377a61c45954ab2df7c7311698b109364352 # v2026.26.9
+        with:
+          aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
+          bazelisk-cache: true
+          disk-cache: ${{ github.workflow }}-mutants
+          repository-cache: true
+      - run: bazel test ${{ matrix.crate.target }}
