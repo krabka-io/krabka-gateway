@@ -65,6 +65,24 @@ async fn boot() -> (BrokerHandle, String, TempDir) {
     (broker, bootstrap, dir)
 }
 
+/// Boots a broker that has an ACL authorizer, for the tests that write ACLs.
+///
+/// Kafka refuses `CreateAcls` with `SECURITY_DISABLED` when the broker has no
+/// authorizer, and so does krabka-broker. The test clients connect over
+/// plaintext as `ANONYMOUS`, so that principal is a super-user here. It can
+/// then create topics and ACLs, and the gateway's own clients can produce and
+/// read the ACLs back.
+async fn boot_with_acl_authorizer() -> (BrokerHandle, String, TempDir) {
+    let dir = TempDir::new().unwrap();
+    let mut config = BrokerConfig::for_tests(dir.path().to_path_buf());
+    config.authorizer = Arc::new(SimpleAclAuthorizer::new(
+        std::iter::once("ANONYMOUS".to_owned()).collect(),
+    ));
+    let broker = Broker::start(config).await.unwrap();
+    let bootstrap = broker.listen_addr().to_string();
+    (broker, bootstrap, dir)
+}
+
 // ---------------------------------------------------------------------------
 // HMAC helper
 // ---------------------------------------------------------------------------
@@ -822,7 +840,7 @@ fn topic_acl(
 /// After the ACL is granted and the cache refreshes, the same request succeeds.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn simpleacl_denies_webhook_principal() {
-    let (broker, bootstrap, _dir) = boot().await;
+    let (broker, bootstrap, _dir) = boot_with_acl_authorizer().await;
 
     let topic = "wh-acl-topic";
     let endpoint_name = "acl-denied";
