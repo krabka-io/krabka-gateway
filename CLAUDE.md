@@ -51,7 +51,7 @@ Do not make style-only sweeps across untouched files. Bring a file into line wit
 
 ## Sibling repositories
 
-The crates this repository depends on live in other `krabka-io` repositories. Each is declared against crates.io in the member manifest and pinned by revision in the one `[patch.crates-io]` table in `Cargo.toml`. Bump a revision there and nowhere else, then regenerate `Cargo.lock` in the same commit. `.github/workflows/sync-siblings.yml` proposes those bumps as pull requests.
+The crates this repository depends on live in other `krabka-io` repositories. Each is declared against crates.io in the member manifest and pinned by revision in the one `[patch.crates-io]` table in `Cargo.toml`. Bump a revision there and nowhere else, then regenerate `Cargo.lock` in the same commit.
 
 ## Execution
 
