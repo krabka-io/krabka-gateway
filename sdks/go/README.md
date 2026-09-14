@@ -44,15 +44,21 @@ cargo run -p krabka-sdk-conformance --bin conformance -- \
 
 The live gateway harness lives at `testdata/docker-compose.yml`. It launches:
 
-- `broker` from `${KRABKA_BROKER_IMAGE:-ghcr.io/krabka-io/krabka-broker:edge}` on `${KRABKA_BROKER_PORT:-9092}`.
-- `gateway` from `${KRABKA_GATEWAY_IMAGE:-ghcr.io/krabka-io/krabka-gateway:edge}` on `${KRABKA_GATEWAY_PORT:-9500}`, configured with `KRABKA_BOOTSTRAP_SERVERS=broker:9092`, `KRABKA_GATEWAY_LISTEN_ADDR=0.0.0.0:9500`, and `KRABKA_GATEWAY_ADVERTISED_ADDR=gateway:9500`.
+- `broker-format`, a one-shot service that runs `krabka-format --standalone` from the broker image and formats the KRaft storage in the `broker-data` volume.
+- `broker` from `${KRABKA_BROKER_IMAGE}` on `${KRABKA_BROKER_PORT:-9092}`. The default is a published `ghcr.io/krabka-io/krabka-broker` delivery image, pinned by digest.
+- `gateway` from `${KRABKA_GATEWAY_IMAGE:-ghcr.io/krabka-io/krabka-gateway:dev}` on `${KRABKA_GATEWAY_PORT:-9500}`, configured with `KRABKA_BOOTSTRAP_SERVERS=broker:9092`, `KRABKA_GATEWAY_LISTEN_ADDR=0.0.0.0:9500`, and `KRABKA_GATEWAY_ADVERTISED_ADDR=gateway:9500`.
 
-The gateway image is assembled from `packaging/apko/krabka-gateway.yaml`, which installs the `krabka-gateway` APK produced by `packaging/melange/krabka.yaml`. Default CI runs `tools/check-sdk-go-harness-artifacts.sh` to verify the apko config, melange subpackage, publish matrix entry, compose wiring, and `docker compose config` when Docker is available. It does not start containers by default.
+Bazel builds the gateway image with `rules_img` in `//packaging`. The image is the Bazel-built `krabka-gateway` binary in a layer on a locked Wolfi base from apko. `bazel run -c opt //packaging:image_load` loads it into the local Docker daemon as `ghcr.io/krabka-io/krabka-gateway:dev`, which is the default gateway image of the harness.
 
-Run the live smoke gate from the repository root only when the broker and gateway images are pullable or locally tagged:
+The broker and gateway images have no shell, so the harness has no container health checks. The gateway exits when it cannot reach the broker, and `restart: on-failure` starts it again. The Go smoke polls the gateway from the host until it answers or a two-minute deadline ends.
+
+Default CI runs `tools/check-sdk-go-harness-artifacts.sh`. It resolves the compose file with `docker compose config` and checks that no image uses `:edge`, that no health check uses `CMD-SHELL`, that the broker image is pinned by digest, and that the gateway image is the tag that `image_load` loads. It does not start containers.
+
+Run the live smoke gate from the repository root:
 
 ```sh
 ./tools/check-sdk-go-harness-artifacts.sh
+bazel run -c opt //packaging:image_load
 docker compose -f sdks/go/testdata/docker-compose.yml up -d
 (cd sdks/go && KRABKA_GO_INTEGRATION=1 KRABKA_GATEWAY_ENDPOINT=http://127.0.0.1:${KRABKA_GATEWAY_PORT:-9500} go test -tags integration ./...)
 docker compose -f sdks/go/testdata/docker-compose.yml down -v
@@ -60,4 +66,4 @@ docker compose -f sdks/go/testdata/docker-compose.yml down -v
 
 The `integration`-tagged Go smoke is opt-in: without `KRABKA_GO_INTEGRATION=1` it skips, and with that opt-in it fails clearly unless `KRABKA_GATEWAY_ENDPOINT` names the compose-published gateway. The current SDK has no standalone gateway hello RPC, so the smoke creates a live SDK client and performs `GET /healthz` through the SDK's default endpoint transport. For plaintext `http://` endpoints, that is the same h2c-capable transport used by streaming SDK calls, proving the compose-published gateway endpoint is reachable without requiring Kafka topic data.
 
-The GitHub Actions live compose smoke sets `KRABKA_GO_INTEGRATION=1` and `KRABKA_GATEWAY_ENDPOINT=http://127.0.0.1:${KRABKA_GATEWAY_PORT:-9500}` and is intentionally `workflow_dispatch`-only for the same image availability reason.
+The `compose-smoke` job in `.github/workflows/sdk-go.yml` runs the same commands. It runs only on a manual `workflow_dispatch` with the `docker_gate` input, because the optimized gateway build is slow.

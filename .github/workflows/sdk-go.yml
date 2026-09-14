@@ -5,6 +5,11 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      docker_gate:
+        description: Load the gateway image, start the compose harness and run the Go live smoke
+        type: boolean
+        default: true
 
 permissions:
   contents: read
@@ -33,12 +38,9 @@ jobs:
         run: |
           go run github.com/bufbuild/buf/cmd/buf@v1.54.0 generate
           git diff --exit-code -- buf.gen.yaml sdks/go/gen
-      # The default run proves the live harness is wired to the published
-      # broker and gateway image artifacts, and validates the compose file
-      # when the runner has docker compose. The live container round-trip is
-      # the explicit workflow_dispatch gate below, because it needs pullable
-      # or locally tagged images.
-      - name: Validate the Go live-harness artifacts (no Docker start)
+      # Resolves the compose harness and checks its images and health checks.
+      # It starts no container. The `compose-smoke` job below starts them.
+      - name: Check the Go live harness (no Docker start)
         run: ./tools/check-sdk-go-harness-artifacts.sh
       - name: Verify the Go SDK
         working-directory: sdks/go
@@ -49,16 +51,58 @@ jobs:
             exit 1
           fi
           go vet ./...
+          go vet -tags integration ./...
           go test ./...
           go build -o bin/conformance-adapter ./cmd/conformance-adapter
       - name: Run SDK conformance
         run: cargo run -p krabka-sdk-conformance --bin conformance -- --adapter sdks/go/bin/conformance-adapter --vectors crates/sdk-conformance/vectors/v1
       - name: Run live-compatible SDK conformance
         run: cargo run -p krabka-sdk-conformance --bin conformance -- --adapter sdks/go/bin/conformance-adapter --vectors crates/sdk-conformance/vectors/v1 --live-substrate --live-compatible-only
-      - name: Compose harness smoke (explicit Docker gate)
-        if: ${{ github.event_name == 'workflow_dispatch' }}
+
+  # The live round trip: the gateway image built from this commit, a pinned
+  # broker image, and the Go smoke against the published gateway port. It
+  # runs only on a manual dispatch with the `docker_gate` input, because the
+  # optimized gateway build is slow.
+  compose-smoke:
+    name: compose harness smoke (Docker gate)
+    if: github.event_name == 'workflow_dispatch' && inputs.docker_gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    permissions:
+      contents: read
+      # The Aspect CLI uploads test logs and BEP through the Actions artifact
+      # API, which needs the OIDC token. See ci.yml.
+      id-token: write
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7.0.0
+        with:
+          go-version-file: sdks/go/go.mod
+          cache-dependency-path: sdks/go/go.sum
+      - uses: aspect-build/setup-aspect@2306377a61c45954ab2df7c7311698b109364352 # v2026.26.9
+        with:
+          aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
+          bazelisk-cache: true
+          disk-cache: ${{ github.workflow }}-image
+          repository-cache: true
+      - name: Load the gateway image
+        run: bazel run -c opt //packaging:image_load
+      # The Go smoke polls the gateway until a deadline, so the step does not
+      # wait for the containers. When the smoke fails, the trap writes the
+      # container state and logs to the job log. It always removes the stack.
+      - name: Compose harness smoke
         working-directory: sdks/go
         run: |
-          docker compose -f testdata/docker-compose.yml up -d
-          trap 'docker compose -f testdata/docker-compose.yml down -v' EXIT
+          set -euo pipefail
+          compose=(docker compose -f testdata/docker-compose.yml)
+          cleanup() {
+            local status=$?
+            if [ "${status}" -ne 0 ]; then
+              "${compose[@]}" ps -a
+              "${compose[@]}" logs --no-color
+            fi
+            "${compose[@]}" down -v
+          }
+          trap cleanup EXIT
+          "${compose[@]}" up -d
           KRABKA_GO_INTEGRATION=1 KRABKA_GATEWAY_ENDPOINT="http://127.0.0.1:${KRABKA_GATEWAY_PORT:-9500}" go test -tags integration ./...
