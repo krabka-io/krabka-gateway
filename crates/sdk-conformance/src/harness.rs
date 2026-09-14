@@ -11,12 +11,16 @@ use std::{
 
 use krabka_broker::{Broker, BrokerConfig, BrokerHandle};
 use krabka_client_admin::{AdminClient, CreateTopicSpec};
+use krabka_client_core::Client;
 use krabka_gateway::{
     codec::{CodecError, Decoded, EncodeBody, RecordCodec},
     config::GatewayConfig,
     produce::ProduceCore,
     serve,
     state::AppState,
+};
+use krabka_protocol::owned::incremental_alter_configs_request::{
+    AlterConfigsResource, AlterableConfig, IncrementalAlterConfigsRequest,
 };
 use krabka_units::prelude::*;
 use tokio::{
@@ -129,7 +133,8 @@ impl Harness {
             }
             HarnessSubstrate::Live => {
                 let topic_names = topic_names_for_vectors(&live_plan.vectors);
-                let live = LiveSubstrate::boot(&topic_names).await?;
+                let queue_groups = queue_groups_for_vectors(&live_plan.vectors);
+                let live = LiveSubstrate::boot(&topic_names, &queue_groups).await?;
                 let endpoint = live.endpoint.clone();
                 let result = self
                     .run_vectors_with_endpoint(live_plan.vectors, skipped, &endpoint)
@@ -328,6 +333,23 @@ fn topic_names_for_vectors(vectors: &[Vector]) -> Vec<String> {
     names.into_iter().collect()
 }
 
+/// The share groups that the vectors acquire from, each named once.
+///
+/// An empty group name is left out. The error vectors send one on purpose, and
+/// the broker refuses a config for it.
+fn queue_groups_for_vectors(vectors: &[Vector]) -> Vec<String> {
+    vectors
+        .iter()
+        .flat_map(|vector| &vector.steps)
+        .filter_map(|step| match &step.command {
+            Command::QueueAcquire { group, .. } if !group.is_empty() => Some(group.clone()),
+            _ => None,
+        })
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
 fn is_creatable_topic(topic: &str) -> bool {
     !topic.is_empty() && !topic.starts_with("__missing_")
 }
@@ -341,15 +363,28 @@ struct LiveSubstrate {
 }
 
 impl LiveSubstrate {
-    async fn boot(topic_names: &[String]) -> Result<Self, HarnessError> {
+    async fn boot(topic_names: &[String], queue_groups: &[String]) -> Result<Self, HarnessError> {
         let data_dir = tempfile::TempDir::new()?;
         let mut broker_config = BrokerConfig::for_tests(data_dir.path().to_path_buf());
         broker_config.classic_group_initial_rebalance_delay = millis(1);
-        let broker = Broker::start(broker_config)
-            .await
-            .map_err(HarnessError::BrokerStart)?;
+        // `for_tests` names the controller as `127.0.0.1:0`. The broker binds
+        // an ephemeral port for it, but its heartbeat client dials the address
+        // in `controller_quorum_voters`, which still says port 0. No heartbeat
+        // arrives, so two seconds after start the controller marks the broker
+        // dead, fences it, and leaves its partitions without a leader. Binding
+        // the controller port first gives the voter entry the real address.
+        let controller_listener = TcpListener::bind("127.0.0.1:0").await?;
+        let controller_addr = controller_listener.local_addr()?;
+        broker_config.controller_listen_addr = controller_addr;
+        broker_config.controller_quorum_voters =
+            vec![(broker_config.node_id, controller_addr.to_string())];
+        let broker =
+            Broker::start_with_controller_listener(broker_config, Some(controller_listener))
+                .await
+                .map_err(HarnessError::BrokerStart)?;
         let bootstrap = broker.listen_addr().to_string();
         create_topics(&bootstrap, topic_names).await?;
+        set_share_groups_earliest(&bootstrap, queue_groups).await?;
 
         let listener = TcpListener::bind("127.0.0.1:0").await?;
         let listen_addr = listener.local_addr()?;
@@ -401,6 +436,62 @@ async fn create_topics(bootstrap: &str, topic_names: &[String]) -> Result<(), Ha
         .await
         .map(|_| ())
         .map_err(HarnessError::Admin)
+}
+
+/// Kafka resource type id for `GROUP`.
+const RESOURCE_TYPE_GROUP: i8 = 32;
+
+/// `SET` in the `IncrementalAlterConfigs` wire protocol.
+const CONFIG_OPERATION_SET: i8 = 0;
+
+/// Puts each share group on `share.auto.offset.reset=earliest`.
+///
+/// The queue vectors publish a record and then acquire it. KIP-932 starts a
+/// share partition that has no state at `latest` by default, so without this
+/// setting the first acquire does not see a record published before it. An
+/// operator runs the same `kafka-configs --entity-type groups --alter` to make
+/// a share group read a topic from its beginning.
+async fn set_share_groups_earliest(bootstrap: &str, groups: &[String]) -> Result<(), HarnessError> {
+    if groups.is_empty() {
+        return Ok(());
+    }
+    let client = Client::builder()
+        .bootstrap(bootstrap.to_string())
+        .build()
+        .await
+        .map_err(HarnessError::Client)?;
+    let response = client
+        .send(IncrementalAlterConfigsRequest {
+            resources: groups
+                .iter()
+                .map(|group| AlterConfigsResource {
+                    resource_type: RESOURCE_TYPE_GROUP,
+                    resource_name: group.clone(),
+                    configs: vec![AlterableConfig {
+                        name: "share.auto.offset.reset".into(),
+                        config_operation: CONFIG_OPERATION_SET,
+                        value: Some("earliest".into()),
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                })
+                .collect(),
+            ..Default::default()
+        })
+        .await
+        .map_err(HarnessError::Client)?;
+    if let Some(rejected) = response
+        .responses
+        .into_iter()
+        .find(|resource| resource.error_code != 0)
+    {
+        return Err(HarnessError::GroupConfig {
+            group: rejected.resource_name,
+            code: rejected.error_code,
+            message: rejected.error_message.unwrap_or_default(),
+        });
+    }
+    Ok(())
 }
 
 async fn gateway_state(
@@ -595,6 +686,19 @@ pub enum HarnessError {
     /// Admin client setup failed.
     #[error("live substrate admin: {0}")]
     Admin(krabka_client_admin::AdminError),
+    /// A raw protocol client request failed.
+    #[error("live substrate client: {0}")]
+    Client(krabka_client_core::ClientError),
+    /// The broker rejected a share group config.
+    #[error("live substrate group config for {group}: error {code}: {message}")]
+    GroupConfig {
+        /// Share group name.
+        group: String,
+        /// Kafka error code.
+        code: i16,
+        /// Broker error message.
+        message: String,
+    },
     /// Gateway state failed to initialize.
     #[error("live substrate gateway init: {0}")]
     GatewayInit(krabka_gateway::error::GatewayError),
