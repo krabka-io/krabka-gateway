@@ -52,6 +52,7 @@ async fn jvm_consumer_reads_gateway_output() {
             protocol: ListenerProtocol::Plaintext,
             tls_config: None,
             sasl_mechanisms: None,
+            principal_mapper: krabka_broker::SslPrincipalMapper::default(),
         },
         ListenerSpec {
             name: "DOCKER".into(),
@@ -60,6 +61,7 @@ async fn jvm_consumer_reads_gateway_output() {
             protocol: ListenerProtocol::Plaintext,
             tls_config: None,
             sasl_mechanisms: None,
+            principal_mapper: krabka_broker::SslPrincipalMapper::default(),
         },
     ];
     config.inter_broker_listener_name = "HOST".into();
