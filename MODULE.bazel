@@ -158,14 +158,15 @@ crate.from_cargo(
 SIBLING_MEMBERS = {
     "krabka-audit": "crates/audit",
     "krabka-authz": "crates/authz",
-    "krabka-broker": "crates/broker",
     "krabka-client-admin": "crates/client-admin",
     "krabka-client-consumer": "crates/client-consumer",
+    "krabka-client-coordination": "crates/client-coordination",
     "krabka-client-core": "crates/client-core",
     "krabka-client-producer": "crates/client-producer",
     "krabka-client-streams": "crates/client-streams",
     "krabka-compression": "crates/compression",
     "krabka-format": "crates/format",
+    "krabka-hlc": "crates/hlc",
     "krabka-ids": "crates/ids",
     "krabka-kafka-tap": "crates/kafka-tap",
     "krabka-kraft-core": "crates/kraft-core",
@@ -195,6 +196,19 @@ SIBLING_MEMBERS = {
     )
     for crate_name, directory in SIBLING_MEMBERS.items()
 ]
+
+# krabka-broker carries the same member annotation plus one more. Its build.rs
+# reads the image digests from krabka-broker's own MODULE.bazel, two levels
+# above the crate, and emits them for a guard in `src/codes/tests.rs`. That file
+# is not part of the crate that rules_rs fetches, and only the broker's own
+# tests read the variables. The Cargo build and the Bazel build in krabka-broker
+# still run the script.
+crate.annotation(
+    crate = "krabka-broker",
+    gen_build_script = "off",
+    strip_prefix = "crates/broker",
+    workspace_cargo_toml = "Cargo.toml",
+)
 
 # krabka-protocol carries the same member annotation plus one more. Its build.rs
 # only checks that its checked-in `generated/` sources still match the
