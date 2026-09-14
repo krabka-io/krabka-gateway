@@ -121,8 +121,19 @@ local capture server. The in-process regression for the same paths is
 
 ## Container image
 
-[`packaging/apko/krabka-gateway.yaml`](packaging/apko/krabka-gateway.yaml)
-builds the distroless image around the `krabka-gateway` binary.
+The gateway image is `ghcr.io/krabka-io/krabka-gateway`. Bazel builds it in
+[`packaging`](packaging/BUILD.bazel): apko makes a locked Wolfi base, and
+`rules_img` adds the Bazel-built `krabka-gateway` binary. The image runs as the
+non-root user 65532 and has no shell.
+
+```bash
+bazel run -c opt //packaging:image_load
+docker run --rm ghcr.io/krabka-io/krabka-gateway:dev --help
+```
+
+Each push to `main` publishes the image with the commit SHA as its tag. A `v*`
+tag promotes that image to the version tag, and to `latest` when it is the
+newest release.
 
 ## Kubernetes
 
