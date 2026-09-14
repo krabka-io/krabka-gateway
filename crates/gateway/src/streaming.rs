@@ -330,7 +330,7 @@ fn filter_schema_json_group(
 fn decode_arrow_ipc_record(
     record: &crate::consume::DecodedConsumerRecord,
 ) -> Result<Option<(Vec<arrow::array::RecordBatch>, usize)>, crate::filter::FilterCompileError> {
-    let Ok(reader) = arrow::ipc::reader::StreamReader::try_new(&record.value[..], None) else {
+    let Some(reader) = crate::filter::arrow_ipc_stream_reader(&record.value) else {
         return Ok(None);
     };
 
