@@ -90,6 +90,24 @@ async fn boot() -> (BrokerHandle, String, TempDir) {
     (broker, bootstrap, dir)
 }
 
+/// Boots a broker that has an ACL authorizer, for the tests that write ACLs.
+///
+/// Kafka refuses `CreateAcls` with `SECURITY_DISABLED` when the broker has no
+/// authorizer, and so does krabka-broker. The test clients connect over
+/// plaintext as `ANONYMOUS`, so that principal is a super-user here. It can
+/// then create topics and ACLs, and the gateway's own clients can produce and
+/// read the ACLs back.
+async fn boot_with_acl_authorizer() -> (BrokerHandle, String, TempDir) {
+    let dir = TempDir::new().unwrap();
+    let mut config = BrokerConfig::for_tests(dir.path().to_path_buf());
+    config.authorizer = Arc::new(SimpleAclAuthorizer::new(
+        std::iter::once("ANONYMOUS".to_owned()).collect(),
+    ));
+    let broker = Broker::start(config).await.unwrap();
+    let bootstrap = broker.listen_addr().to_string();
+    (broker, bootstrap, dir)
+}
+
 /// A resolved caller identity over mTLS with no groups, the shape the trusted
 /// proxy injects. An ACL is written against `User:{name}`.
 fn principal(name: &str) -> Principal {
@@ -310,7 +328,7 @@ async fn simpleacl_denies_unauthorized_produce() {
 ///    present. A produce to `other`, which has no ACL, is still denied.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn simpleacl_allows_authorized_produce() {
-    let (broker, bootstrap, _dir) = boot().await;
+    let (broker, bootstrap, _dir) = boot_with_acl_authorizer().await;
     create_topic(&bootstrap, "t").await;
     create_topic(&bootstrap, "other").await;
 
@@ -412,7 +430,7 @@ async fn bearer_token_resolves_principal() {
 ///    "denied ⇒ Unauthorized and not produced".
 #[tokio::test(flavor = "multi_thread", worker_threads = 6)]
 async fn forwarding_owner_reauthorizes_caller() {
-    let (broker, bootstrap, _dir) = boot().await;
+    let (broker, bootstrap, _dir) = boot_with_acl_authorizer().await;
     ensure_dedup_topic(
         &bootstrap,
         DEDUP,
@@ -786,8 +804,8 @@ async fn spawn_acl_gateway(bootstrap: &str, client: &str) -> AclGw {
     });
 
     {
-        let app = krabka_gateway::router(state.clone())
-            .merge(forward::forward_router(state.clone()));
+        let app =
+            krabka_gateway::router(state.clone()).merge(forward::forward_router(state.clone()));
         let token = token.clone();
         tokio::spawn(async move {
             let _ = axum::serve(listener, app)

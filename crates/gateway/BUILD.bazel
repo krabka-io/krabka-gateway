@@ -30,8 +30,8 @@ crate_binary(
 )
 
 crate_tests(
-    lib = "gateway",
     data = [":test_scripts"],
+    lib = "gateway",
     # `jvm_differential` starts a cp-kafka container and drives the JVM consumer
     # against the gateway. Bazel cannot declare a Docker daemon as an input, so
     # the suite stays out of a plain `bazel test //...`.

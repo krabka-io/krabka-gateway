@@ -9,6 +9,7 @@ away from the manifests Cargo still resolves.
 
 load("@crates//:data.bzl", "DEP_DATA")
 load("@crates//:defs.bzl", "all_crate_deps", "crate_name", "edition")
+load("@rules_rs//rs:cargo_build_script.bzl", "cargo_build_script")
 load("@rules_rs//rs:rust_binary.bzl", "rust_binary")
 load("@rules_rs//rs:rust_library.bzl", "rust_library")
 load("@rules_rs//rs:rust_test.bzl", "rust_test")
@@ -16,7 +17,7 @@ load("@rules_rs_mutants//mutants:cargo_mutants_test.bzl", "cargo_mutants_test")
 load("@rules_rust//rust:defs.bzl", "rust_doc", "rust_doc_test", "rust_proc_macro")
 load("//tools/lint:linters.bzl", "clippy_test")
 
-# `[workspace.lints.rust] unsafe_code = "forbid"`. rules_rs 0.0.106 does not
+# `[workspace.lints.rust] unsafe_code = "forbid"`. rules_rs 0.0.110 does not
 # yet plumb Cargo lint tables into the Bazel build, and this is the one lint
 # in that table whose guarantee must not lapse under a second build system.
 # The clippy tables stay a Cargo-side gate: clippy runs as an aspect here, not
@@ -57,6 +58,7 @@ def crate_library(
         srcs = None,
         build_script_data = None,
         build_script_compile_data = None,
+        build_script_env = {},
         **kwargs):
     """`rust_library` for a workspace member, configured from Cargo metadata.
 
@@ -68,9 +70,42 @@ def crate_library(
       build_script_compile_data: files the crate's `build.rs` reaches with
         `include_str!`/`include_bytes!`, which are read while it compiles
         rather than while it runs.
+      build_script_env: extra environment for the crate's `build.rs`, e.g. a
+        path to its `build_script_data` under `${pwd}`, the execution root.
       **kwargs: passed through to `rust_library`.
     """
     deps = all_crate_deps(normal = True)
+
+    # A crate with a `build.rs` gets a build script target, and its `OUT_DIR`
+    # reaches the library. Two crates here generate prost types from
+    # //crates/gateway:proto and `include!` them from `OUT_DIR`. Without this
+    # target, the include has no directory to read.
+    if native.glob(["build.rs"], allow_empty = True):
+        script = name + "_build_script"
+
+        # The build supplies `protoc`. The `protoc-bin-vendored-*` crates find
+        # their binary through `env!("CARGO_MANIFEST_DIR")`. That bakes an
+        # absolute build path into the artifact, and the path does not exist in
+        # the sandbox that runs the script. So this target drops the feature
+        # that pulls those crates in and sets `PROTOC`, which `build.rs` prefers.
+        # Cargo keeps the feature on by default.
+        cargo_build_script(
+            name = script,
+            srcs = ["build.rs"],
+            build_script_env = build_script_env | {"PROTOC": "$(execpath //bazel:protoc)"},
+            compile_data = build_script_compile_data or [],
+            crate_features = [f for f in _features() if f != "vendored-protoc"],
+            crate_name = crate_name() + "_build_script",
+            data = build_script_data or [],
+            edition = edition(),
+            tools = ["//bazel:protoc"],
+            deps = [
+                dep
+                for dep in all_crate_deps(build = True)
+                if "protoc-bin-vendored" not in dep
+            ],
+        )
+        deps = deps + [":" + script]
 
     rust_library(
         name = name,
@@ -130,13 +165,16 @@ def crate_proc_macro(name, srcs = None, **kwargs):
         **kwargs
     )
 
-def crate_binary(name, crate_root, lib, tests = True, **kwargs):
+def crate_binary(name, crate_root, lib, deps = [], tests = True, **kwargs):
     """`rust_binary` for a `[[bin]]` target that links its own crate's library.
 
     Args:
       name: the binary target name, matching Cargo's `[[bin]] name`.
       crate_root: the binary's entry point, e.g. `src/bin/broker.rs`.
       lib: the `crate_library` target in this package that it links.
+      deps: more dependencies. The Cargo resolution that Bazel reads has
+        only the default features, so a dependency that an optional feature
+        adds is not in it. Name such a dependency here.
       tests: emit a `rust_test` over the binary's own `#[cfg(test)]` module.
         `cargo test` runs those; without this they are simply not run.
       **kwargs: passed through to `rust_binary`.
@@ -150,7 +188,7 @@ def crate_binary(name, crate_root, lib, tests = True, **kwargs):
         edition = edition(),
         rustc_flags = WORKSPACE_RUSTC_FLAGS,
         visibility = ["//visibility:public"],
-        deps = all_crate_deps(normal = True) + [lib],
+        deps = all_crate_deps(normal = True) + [lib] + deps,
         **kwargs
     )
 

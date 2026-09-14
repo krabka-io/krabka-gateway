@@ -488,9 +488,9 @@ fn build_bearer(
             }
             .build()
             .map_err(|e| anyhow::anyhow!("bearer: {e}"))?;
-            Ok(Some(
-                krabka_gateway::authz::auth_layer::BearerValidator(Arc::new(v)),
-            ))
+            Ok(Some(krabka_gateway::authz::auth_layer::BearerValidator(
+                Arc::new(v),
+            )))
         }
         other => anyhow::bail!("invalid --bearer: {other}"),
     }

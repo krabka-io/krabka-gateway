@@ -38,6 +38,7 @@ use axum::{
     routing::post,
 };
 use bytes::Bytes;
+use hmac::{Hmac, KeyInit, Mac};
 use krabka_broker::{Broker, BrokerConfig, BrokerHandle};
 use krabka_client_admin::{AdminClient, CreateTopicSpec};
 use krabka_client_core::Client;
@@ -52,7 +53,6 @@ use krabka_protocol::owned::{
     metadata_request::MetadataRequest,
 };
 use krabka_units::prelude::*;
-use hmac::{Hmac, KeyInit, Mac};
 use serde_json::Value;
 use sha2::Sha256;
 use tempfile::TempDir;

@@ -13,7 +13,8 @@ module(
     version = "0.4.0",
 )
 
-bazel_dep(name = "rules_rs", version = "0.0.106")
+bazel_dep(name = "platforms", version = "1.1.0")
+bazel_dep(name = "rules_rs", version = "0.0.110")
 bazel_dep(name = "rules_rs_mutants", version = "0.0.1")
 
 # rules_rs_mutants is not published to the Bazel Central Registry, so the
@@ -39,6 +40,29 @@ bazel_dep(name = "llvm", version = "0.8.18")
 
 register_toolchains("@llvm//toolchain:all")
 
+# ---------------------------------------------------------------------------
+# Container image. See //packaging.
+#
+# apko builds the Wolfi base from a lock file. rules_img layers the Bazel-built
+# gateway binary on that base, loads the image into a local daemon and pushes
+# it to the registry. krabka-broker uses the same arrangement.
+# ---------------------------------------------------------------------------
+bazel_dep(name = "rules_img", version = "0.3.20")
+bazel_dep(name = "rules_apko", version = "1.5.56")
+
+# `sh_test`, for the checks on the image layers.
+bazel_dep(name = "rules_shell", version = "0.8.0")
+
+apko = use_extension("@rules_apko//apko:extensions.bzl", "apko")
+apko.toolchain(apko_version = "v1.2.40")
+apko.translate_lock(
+    name = "gateway_base_lock",
+    lock = "//packaging:base.apko.lock.json",
+)
+use_repo(apko, "apko_toolchains", "gateway_base_lock")
+
+register_toolchains("@apko_toolchains//:all")
+
 # Format and lint. See //tools/lint.
 bazel_dep(name = "aspect_rules_lint", version = "2.7.2")
 
@@ -47,7 +71,7 @@ bazel_dep(name = "aspect_rules_lint", version = "2.7.2")
 bazel_dep(name = "aspect_rules_lint_rust", version = "0.0.2")
 
 # See the patch header: that module registers `@default_rust_toolchains//:all`,
-# a package rules_rs 0.0.106 does not create.
+# a package rules_rs 0.0.110 does not create.
 single_version_override(
     module_name = "aspect_rules_lint_rust",
     patch_strip = 1,
@@ -56,6 +80,23 @@ single_version_override(
 )
 
 bazel_dep(name = "buildifier_prebuilt", version = "8.5.1.3")
+
+# `protoc` for the gateway's build script, which generates the Connect-RPC
+# stubs. The build supplies it, so the build script does not locate a vendored
+# binary through that crate's own manifest path.
+#
+# A prebuilt binary. The `protobuf` module builds protoc from its C++ sources,
+# which adds minutes of compilation to a cold run.
+bazel_dep(name = "toolchains_protoc", version = "0.6.1")
+
+# For the `@rules_proto//proto:toolchain_type` that `//bazel:protoc` resolves.
+bazel_dep(name = "rules_proto", version = "7.1.0")
+
+protoc = use_extension("@toolchains_protoc//protoc:extensions.bzl", "protoc")
+protoc.toolchain(version = "v27.3")
+use_repo(protoc, "toolchains_protoc_hub")
+
+register_toolchains("@toolchains_protoc_hub//:all")
 
 # rules_rs vends its own patched @rules_rust. `rust_doc_test` has no rules_rs
 # wrapper, so it is loaded from there directly rather than from a second copy.
@@ -81,7 +122,7 @@ toolchains.toolchain(
     # that "one dependency source of truth" exists to avoid.
     version = "1.97.1",
 )
-use_repo(toolchains, "krabka_rust_toolchains")
+use_repo(toolchains, "default_rust_toolchains", "krabka_rust_toolchains")
 
 register_toolchains("@krabka_rust_toolchains//...")
 
@@ -141,14 +182,15 @@ crate.from_cargo(
 SIBLING_MEMBERS = {
     "krabka-audit": "crates/audit",
     "krabka-authz": "crates/authz",
-    "krabka-broker": "crates/broker",
     "krabka-client-admin": "crates/client-admin",
     "krabka-client-consumer": "crates/client-consumer",
+    "krabka-client-coordination": "crates/client-coordination",
     "krabka-client-core": "crates/client-core",
     "krabka-client-producer": "crates/client-producer",
     "krabka-client-streams": "crates/client-streams",
     "krabka-compression": "crates/compression",
     "krabka-format": "crates/format",
+    "krabka-hlc": "crates/hlc",
     "krabka-ids": "crates/ids",
     "krabka-kafka-tap": "crates/kafka-tap",
     "krabka-kraft-core": "crates/kraft-core",
@@ -179,6 +221,19 @@ SIBLING_MEMBERS = {
     for crate_name, directory in SIBLING_MEMBERS.items()
 ]
 
+# krabka-broker carries the same member annotation plus one more. Its build.rs
+# reads the image digests from krabka-broker's own MODULE.bazel, two levels
+# above the crate, and emits them for a guard in `src/codes/tests.rs`. That file
+# is not part of the crate that rules_rs fetches, and only the broker's own
+# tests read the variables. The Cargo build and the Bazel build in krabka-broker
+# still run the script.
+crate.annotation(
+    crate = "krabka-broker",
+    gen_build_script = "off",
+    strip_prefix = "crates/broker",
+    workspace_cargo_toml = "Cargo.toml",
+)
+
 # krabka-protocol carries the same member annotation plus one more. Its build.rs
 # only checks that its checked-in `generated/` sources still match the
 # `schemas/` SHAs; it emits no code. It reads its own manifest directory through
@@ -193,9 +248,41 @@ crate.annotation(
     strip_prefix = "crates/protocol",
     workspace_cargo_toml = "Cargo.toml",
 )
+
+# datafusion-common's `test_util` finds datafusion's test-data submodule through
+# `env!("CARGO_MANIFEST_DIR")`. No feature gates that module, so every build of
+# the library compiles it. `env!` bakes the absolute build directory into the
+# artifact, and the sandboxed build rejects that. The patch reads the variable
+# at run time. The only caller is a test helper, and Cargo sets the variable
+# for test binaries.
+crate.annotation(
+    crate = "datafusion-common",
+    patch_args = ["-p1"],
+    patches = ["//bazel/patches:datafusion-common-manifest-dir.patch"],
+)
 crate.annotation(
     crate = "cargo-mutants",
     gen_binaries = ["cargo-mutants"],
     repositories = ["mutants"],
 )
+crate.annotation(
+    crate = "aws-lc-rs",
+    gen_build_script = "off",
+)
+crate.annotation(
+    additive_build_file = "@rules_rs//3rd_party/aws-lc-sys:additive.BUILD.bazel",
+    crate = "aws-lc-sys",
+    extra_aliased_targets = {"aws_lc_sys_build_info": "aws_lc_sys_build_info"},
+    gen_build_script = "off",
+    rustc_flags = ["--cfg=use_bindgen_pregenerated"],
+    # One version resolves here, so the target needs no version suffix.
+    deps = ["@crates//:aws_lc_sys_build_info"],
+)
+crate.annotation(
+    crate = "zstd-sys",
+    gen_build_script = "off",
+    deps = ["@zstd"],
+)
 use_repo(crate, "crates", "mutants")
+
+inject_repo(crate, "aws-lc")

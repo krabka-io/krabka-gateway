@@ -23,7 +23,9 @@ clap = { workspace = true, features = ["derive"] }
 krabka-authz = { workspace = true }
 krabka-broker = { workspace = true, features = ["test-helpers"] }
 krabka-client-admin = { workspace = true }
+krabka-client-core = { workspace = true }
 krabka-gateway = { version = "0.4.0", path = "../gateway" }
+krabka-protocol = { workspace = true }
 krabka-units = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }

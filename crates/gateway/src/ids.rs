@@ -21,11 +21,11 @@
 //! `#[serde(transparent)]`. The encoded JSON is exactly the inner primitive and
 //! never a wrapping object, which keeps the byte shape identical.
 
+use derive_more::{Display, From, Into};
 /// The canonical cross-crate Kafka `(partition, offset)` coordinate.
 /// `Timestamp` stays gateway-local, because it is not one of the shared core
 /// identifiers.
 pub use krabka_ids::{Offset, PartitionIndex};
-use derive_more::{Display, From, Into};
 use serde::{Deserialize, Serialize};
 
 /// A record's timestamp in epoch milliseconds. It is an `i64` on the wire.

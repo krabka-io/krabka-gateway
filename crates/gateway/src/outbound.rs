@@ -21,10 +21,10 @@ use std::{
 
 use base64::{Engine, engine::general_purpose::STANDARD as B64STD};
 use bytes::Bytes;
+use jsonpath_rust::{parser::model::JpQuery, query::js_path_process};
 use krabka_client_consumer::{Assignor, AutoOffsetReset, Consumer, ConsumerRecord, IsolationLevel};
 use krabka_client_producer::{Header, Producer, ProducerRecord};
 use krabka_units::prelude::*;
-use jsonpath_rust::{parser::model::JpQuery, query::js_path_process};
 use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 

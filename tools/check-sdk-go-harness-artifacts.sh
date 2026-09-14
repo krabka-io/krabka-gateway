@@ -2,11 +2,10 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-APKO_CONFIG="${ROOT}/packaging/apko/krabka-gateway.yaml"
+IMAGE_BUILD="${ROOT}/packaging/BUILD.bazel"
+CI_WORKFLOW="${ROOT}/.github/workflows/ci.yml"
 COMPOSE_CONFIG="${ROOT}/sdks/go/testdata/docker-compose.yml"
 GO_INTEGRATION_TEST="${ROOT}/sdks/go/integration_smoke_test.go"
-MELANGE_CONFIG="${ROOT}/packaging/melange/krabka.yaml"
-PUBLISH_IMAGES_WORKFLOW="${ROOT}/.github/workflows/publish-images.yml"
 SDK_GO_WORKFLOW="${ROOT}/.github/workflows/sdk-go.yml"
 
 require_file() {
@@ -28,35 +27,17 @@ require_line() {
   return 1
 }
 
-require_command_or_note() {
-  local command_name="$1"
-  local reason="$2"
-  if command -v "${command_name}" >/dev/null 2>&1; then
-    return 0
-  fi
-  printf 'note: %s is not installed; relying on static %s checks\n' "${command_name}" "${reason}" >&2
-  return 1
-}
-
-require_file "${APKO_CONFIG}"
+require_file "${IMAGE_BUILD}"
+require_file "${CI_WORKFLOW}"
 require_file "${COMPOSE_CONFIG}"
 require_file "${GO_INTEGRATION_TEST}"
-require_file "${MELANGE_CONFIG}"
-require_file "${PUBLISH_IMAGES_WORKFLOW}"
 require_file "${SDK_GO_WORKFLOW}"
 
-require_line "${APKO_CONFIG}" '^    - krabka-gateway$'
-require_line "${APKO_CONFIG}" '^  command: /usr/bin/krabka-gateway$'
-require_line "${APKO_CONFIG}" '^  - x86_64$'
-require_line "${APKO_CONFIG}" '^  - aarch64$'
+require_line "${IMAGE_BUILD}" '"/usr/bin/krabka-gateway": "//crates/gateway:krabka-gateway"'
+require_line "${IMAGE_BUILD}" 'entrypoint = \["/usr/bin/krabka-gateway"\]'
+require_line "${IMAGE_BUILD}" 'repository = "krabka-io/krabka-gateway"'
 
-require_line "${MELANGE_CONFIG}" '-p krabka-gateway'
-require_line "${MELANGE_CONFIG}" '--bin krabka-gateway'
-require_line "${MELANGE_CONFIG}" '^  - name: krabka-gateway$'
-require_line "${MELANGE_CONFIG}" 'install -D -m 0755 dist/krabka-gateway .*/usr/bin/krabka-gateway'
-
-require_line "${PUBLISH_IMAGES_WORKFLOW}" '^          - krabka-gateway$'
-require_line "${PUBLISH_IMAGES_WORKFLOW}" 'packaging/apko/\$\{IMAGE\}\.yaml'
+require_line "${CI_WORKFLOW}" 'bazel run -c opt //packaging:push'
 
 require_line "${COMPOSE_CONFIG}" '^  broker:$'
 require_line "${COMPOSE_CONFIG}" '^  gateway:$'
@@ -79,10 +60,6 @@ require_line "${GO_INTEGRATION_TEST}" 'checkGatewayHealthOverSDKTransport'
 require_line "${SDK_GO_WORKFLOW}" 'KRABKA_GO_INTEGRATION=1'
 require_line "${SDK_GO_WORKFLOW}" 'KRABKA_GATEWAY_ENDPOINT="http://127\.0\.0\.1:\$\{KRABKA_GATEWAY_PORT:-9500\}"'
 require_line "${SDK_GO_WORKFLOW}" 'go test -tags integration ./\.\.\.'
-
-if require_command_or_note apko 'apko config shape'; then
-  apko show-config "${APKO_CONFIG}" >/dev/null
-fi
 
 if command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; then
   docker compose -f "${COMPOSE_CONFIG}" config --quiet

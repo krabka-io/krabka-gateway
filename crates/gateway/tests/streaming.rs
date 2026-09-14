@@ -6,6 +6,7 @@ use std::{collections::BTreeMap, net::SocketAddr, sync::Arc};
 use assert2::check;
 use bytes::Bytes;
 use connectrpc_axum::message::Streaming;
+use futures_util::StreamExt;
 use krabka_broker::{Broker, BrokerConfig, BrokerHandle};
 use krabka_client_admin::{AdminClient, CreateTopicSpec};
 use krabka_client_consumer::{AutoOffsetReset, Consumer, IsolationLevel};
@@ -13,7 +14,6 @@ use krabka_gateway::{
     codec::RawCodec, config::GatewayConfig, pb, produce::ProduceCore, state::AppState, streaming,
 };
 use krabka_units::prelude::*;
-use futures_util::StreamExt;
 use tempfile::TempDir;
 
 async fn boot() -> (BrokerHandle, String, TempDir) {
@@ -182,41 +182,36 @@ async fn subscribe_streams_cloudevent_headers_then_commits() {
 
     // Produce one record up front.
     let (prod_principal, _) = anon();
-    krabka_gateway::produce::ProduceCore::new(
-        &bootstrap,
-        "sub-prod",
-        Arc::new(RawCodec),
-        None,
-    )
-    .await
-    .unwrap()
-    .produce(
-        krabka_gateway::types::GatewayRecord {
-            topic: "sub-topic".into(),
-            key: None,
-            value: Bytes::from_static(b"hello"),
-            body_structured: None,
-            headers: vec![
-                ("ce_id".into(), Some(Bytes::from_static(b"event-1"))),
-                ("ce_source".into(), Some(Bytes::from_static(b"/tests"))),
-                (
-                    "ce_type".into(),
-                    Some(Bytes::from_static(b"example.created")),
-                ),
-                ("ce_specversion".into(), Some(Bytes::from_static(b"1.0"))),
-                (
-                    "content-type".into(),
-                    Some(Bytes::from_static(b"text/plain")),
-                ),
-            ],
-            partition: None,
-            timestamp_ms: None,
-            idempotency_key: None,
-        },
-        &prod_principal,
-    )
-    .await
-    .unwrap();
+    krabka_gateway::produce::ProduceCore::new(&bootstrap, "sub-prod", Arc::new(RawCodec), None)
+        .await
+        .unwrap()
+        .produce(
+            krabka_gateway::types::GatewayRecord {
+                topic: "sub-topic".into(),
+                key: None,
+                value: Bytes::from_static(b"hello"),
+                body_structured: None,
+                headers: vec![
+                    ("ce_id".into(), Some(Bytes::from_static(b"event-1"))),
+                    ("ce_source".into(), Some(Bytes::from_static(b"/tests"))),
+                    (
+                        "ce_type".into(),
+                        Some(Bytes::from_static(b"example.created")),
+                    ),
+                    ("ce_specversion".into(), Some(Bytes::from_static(b"1.0"))),
+                    (
+                        "content-type".into(),
+                        Some(Bytes::from_static(b"text/plain")),
+                    ),
+                ],
+                partition: None,
+                timestamp_ms: None,
+                idempotency_key: None,
+            },
+            &prod_principal,
+        )
+        .await
+        .unwrap();
 
     // Control stream: a Start frame (auto_commit), then stays open until dropped.
     let start = pb::SubscribeFrame {

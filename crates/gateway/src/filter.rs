@@ -327,9 +327,9 @@ impl CompiledFilter {
         &self,
         value: &bytes::Bytes,
     ) -> Result<Option<DecodedRecordFilterDecision>, FilterCompileError> {
-        use arrow::{array::Array, ipc::reader::StreamReader};
+        use arrow::array::Array;
 
-        let Ok(reader) = StreamReader::try_new(&value[..], None) else {
+        let Some(reader) = arrow_ipc_stream_reader(value) else {
             return Ok(None);
         };
         let mut row_count = 0;
@@ -1583,6 +1583,36 @@ fn datafusion_error(error: impl std::fmt::Display) -> FilterCompileError {
     FilterCompileError::DataFusion(error.to_string())
 }
 
+/// The marker that the Arrow IPC stream format allows before a message length.
+#[cfg(feature = "arrow")]
+const ARROW_IPC_CONTINUATION_MARKER: [u8; 4] = [0xff; 4];
+
+/// Opens `value` as an Arrow IPC stream. Returns `None` when `value` is not
+/// one.
+///
+/// A stream starts with the length of its schema message, a little-endian
+/// `i32`, and an optional continuation marker comes before it.
+/// `StreamReader::try_new` allocates and zeroes a buffer of that length before
+/// it reads the message. Any other payload gives an arbitrary length: the JSON
+/// bytes `{"ki` read as 1,768,628,859. A filtered subscription tries every
+/// polled record, so each JSON record cost an allocation of 1.6 GiB, about 3 s
+/// in an unoptimised build. This function reads the length first and refuses
+/// a message that the payload does not contain.
+#[cfg(feature = "arrow")]
+pub(crate) fn arrow_ipc_stream_reader(
+    value: &[u8],
+) -> Option<arrow::ipc::reader::StreamReader<&[u8]>> {
+    let framed = value
+        .strip_prefix(&ARROW_IPC_CONTINUATION_MARKER)
+        .unwrap_or(value);
+    let (length, message) = framed.split_first_chunk::<4>()?;
+    let length = usize::try_from(i32::from_le_bytes(*length)).ok()?;
+    if length == 0 || length > message.len() {
+        return None;
+    }
+    arrow::ipc::reader::StreamReader::try_new(value, None).ok()
+}
+
 #[cfg(test)]
 mod tests {
     use bytes::Bytes;
@@ -2258,6 +2288,49 @@ mod tests {
 
         assert_eq!(v1_mask, arrow::array::BooleanArray::from(vec![true]));
         assert_eq!(v2_mask, arrow::array::BooleanArray::from(vec![false]));
+    }
+
+    #[test]
+    #[cfg(feature = "arrow")]
+    fn arrow_ipc_stream_reader_opens_only_payloads_that_hold_their_schema_message() {
+        use arrow::ipc::writer::StreamWriter;
+
+        let batch = arrow_parity_batch();
+        let mut stream = Vec::new();
+        {
+            let mut writer = StreamWriter::try_new(&mut stream, &batch.schema())
+                .expect("Arrow IPC writer builds");
+            writer.write(&batch).expect("Arrow IPC batch writes");
+            writer.finish().expect("Arrow IPC stream finishes");
+        }
+        // `StreamWriter` writes the continuation marker before the schema
+        // message length. A stream without it is valid too.
+        let unmarked = stream
+            .strip_prefix(&ARROW_IPC_CONTINUATION_MARKER)
+            .expect("StreamWriter writes a continuation marker")
+            .to_vec();
+        let twice_marked = [ARROW_IPC_CONTINUATION_MARKER.as_slice(), &stream].concat();
+        let mut overlong = unmarked.clone();
+        overlong[..4].copy_from_slice(&i32::MAX.to_le_bytes());
+
+        let cases: [(&str, &[u8], bool); 10] = [
+            ("stream as StreamWriter writes it", &stream, true),
+            ("stream without the continuation marker", &unmarked, true),
+            ("two continuation markers", &twice_marked, false),
+            ("json object", br#"{"kind":"keep"}"#, false),
+            ("json null field", br#"{"deleted":null}"#, false),
+            ("length past the payload", &overlong, false),
+            ("zero length", &[0, 0, 0, 0, 1], false),
+            ("negative length", &[0, 0, 0, 0x80, 1], false),
+            ("shorter than a length", &[1, 0, 0], false),
+            ("empty", &[], false),
+        ];
+        for (name, payload, opens) in cases {
+            assert2::assert!(
+                arrow_ipc_stream_reader(payload).is_some() == opens,
+                "case: {name}"
+            );
+        }
     }
 
     #[test]

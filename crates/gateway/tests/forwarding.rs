@@ -154,8 +154,8 @@ async fn spawn_gateway(bootstrap: &str, client: &str) -> Gw {
 
     // Serve Connect + forward routes (health omitted — not needed here).
     {
-        let app = krabka_gateway::router(state.clone())
-            .merge(forward::forward_router(state.clone()));
+        let app =
+            krabka_gateway::router(state.clone()).merge(forward::forward_router(state.clone()));
         let token = token.clone();
         tokio::spawn(async move {
             let _ = axum::serve(listener, app)

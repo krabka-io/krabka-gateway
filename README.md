@@ -59,15 +59,21 @@ regenerated fails the build rather than leaving the SDKs behind the server.
 ## Build
 
 ```bash
+bazel build //...
+bazel test //...
+```
+
+Bazel builds and tests the Rust crates, and CI gates on `bazel test //...`.
+The Bazel targets read the same `Cargo.toml` and `Cargo.lock` through
+`crate.from_cargo`, so there is no second dependency set to keep in sync.
+`bazel test //...` also runs clippy on every crate through the `*_clippy`
+targets. Cargo builds the same workspace:
+
+```bash
 cargo test --workspace
 ```
 
-Bazel targets for the Rust crates are checked in and read the same `Cargo.toml`
-and `Cargo.lock` through `crate.from_cargo`, so there is no second dependency
-set to keep in sync. They are not yet a gate: they were written during the
-extraction, without a Bazel run to check them against. Make `bazel test //...`
-the gate once one run has proved it. The SDKs are built by their own
-toolchains, one workflow each.
+The SDKs are built by their own toolchains, one workflow each.
 
 ## Sibling revisions
 
@@ -83,24 +89,25 @@ git twin is also in the graph.
 ## Conformance
 
 ```bash
-cargo build -p krabka-app-sdk --bin conformance_adapter --features conformance-adapter
-cargo run -p krabka-sdk-conformance --bin conformance -- \
-  --adapter target/debug/conformance_adapter \
+bazel build //crates/sdk-conformance:conformance //crates/app-sdk:conformance_adapter
+"$(bazel cquery --output=files //crates/sdk-conformance:conformance)" \
+  --adapter "$(bazel cquery --output=files //crates/app-sdk:conformance_adapter)" \
   --vectors crates/sdk-conformance/vectors/v1
 ```
 
 `--live-substrate --live-compatible-only` runs the same vectors against a live
 in-process gateway instead of the mock, and skips the vectors that describe
-mock-only behaviour.
+mock-only behaviour. With Cargo, build the adapter with
+`cargo build -p krabka-app-sdk --bin conformance_adapter --features conformance-adapter`.
 
 ## Suites that need a daemon
 
 `tests/jvm_differential.rs` starts a `cp-kafka` container and drives the JVM
 consumer against the gateway, so it needs a Docker daemon. It is `#[ignore]`d
-and runs on its own step in CI:
+under Cargo and `manual` under Bazel, and it runs in its own CI job:
 
 ```bash
-cargo nextest run -p krabka-gateway --test jvm_differential --run-ignored only
+bazel test //crates/gateway:jvm_differential_test --test_arg=--ignored
 ```
 
 ## CloudEvents demo
@@ -112,8 +119,19 @@ local capture server. The in-process regression for the same paths is
 
 ## Container image
 
-[`packaging/apko/krabka-gateway.yaml`](packaging/apko/krabka-gateway.yaml)
-builds the distroless image around the `krabka-gateway` binary.
+The gateway image is `ghcr.io/krabka-io/krabka-gateway`. Bazel builds it in
+[`packaging`](packaging/BUILD.bazel): apko makes a locked Wolfi base, and
+`rules_img` adds the Bazel-built `krabka-gateway` binary. The image runs as the
+non-root user 65532 and has no shell.
+
+```bash
+bazel run -c opt //packaging:image_load
+docker run --rm ghcr.io/krabka-io/krabka-gateway:dev --help
+```
+
+Each push to `main` publishes the image with the commit SHA as its tag. A `v*`
+tag promotes that image to the version tag, and to `latest` when it is the
+newest release.
 
 ## Kubernetes
 

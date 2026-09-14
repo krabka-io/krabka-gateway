@@ -10,10 +10,10 @@ use std::sync::{
 };
 
 use bytes::Bytes;
+use dashmap::DashMap;
 use krabka_client_consumer::{AutoOffsetReset, Consumer, IsolationLevel};
 use krabka_client_producer::{Acks, Producer, ProducerRecord};
 use krabka_units::prelude::*;
-use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 
 use crate::{
