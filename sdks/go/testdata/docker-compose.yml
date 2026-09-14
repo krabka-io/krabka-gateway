@@ -1,28 +1,62 @@
+# The live harness for the Go SDK smoke test. See sdks/go/README.md.
+#
+# Both images are distroless Wolfi images with no shell, so this file uses no
+# `CMD-SHELL` health check. The Go smoke test polls the gateway `/healthz`
+# endpoint from the host until a deadline. The gateway exits when it cannot
+# reach the broker at startup, so `restart: on-failure` starts it again until
+# the broker accepts connections.
+
+# The broker image is a published delivery image of krabka-broker, pinned by
+# digest. Set KRABKA_BROKER_IMAGE to use a different image.
+x-broker-image: &broker-image ${KRABKA_BROKER_IMAGE:-ghcr.io/krabka-io/krabka-broker@sha256:0fe7f9f2a2e4ee40126608149498113dc77cc29912831468a050c3088ee5df52}
+
 services:
+  # One-shot: format the KRaft storage of the broker before it starts. With
+  # `--ignore-formatted`, a second run against the same volume exits 0.
+  broker-format:
+    image: *broker-image
+    entrypoint: ["/usr/bin/krabka-format"]
+    command:
+      - --log-dir=/var/lib/krabka/data
+      - --standalone
+      - --node-id=1
+      - --controller-listener=broker:9093
+      - --ignore-formatted
+    volumes:
+      - broker-data:/var/lib/krabka
+
   broker:
-    image: ${KRABKA_BROKER_IMAGE:-ghcr.io/krabka-io/krabka-broker:edge}
-    command: run
+    image: *broker-image
+    command:
+      - --listen-addr=0.0.0.0:9092
+      - --advertised-listener=broker:9092
+      - --log-dir=/var/lib/krabka/data
+      - --broker-id=1
+    depends_on:
+      broker-format:
+        condition: service_completed_successfully
     ports:
       - "${KRABKA_BROKER_PORT:-9092}:9092"
-    healthcheck:
-      test: ["CMD-SHELL", "nc -z 127.0.0.1 9092"]
-      interval: 1s
-      timeout: 1s
-      retries: 60
+    volumes:
+      - broker-data:/var/lib/krabka
 
+  # The default image is the tag that `bazel run -c opt //packaging:image_load`
+  # loads into the local Docker daemon. Set KRABKA_GATEWAY_IMAGE to use a
+  # published image.
   gateway:
-    image: ${KRABKA_GATEWAY_IMAGE:-ghcr.io/krabka-io/krabka-gateway:edge}
+    image: ${KRABKA_GATEWAY_IMAGE:-ghcr.io/krabka-io/krabka-gateway:dev}
     depends_on:
       broker:
-        condition: service_healthy
+        condition: service_started
+    restart: on-failure
     environment:
       KRABKA_BOOTSTRAP_SERVERS: broker:9092
       KRABKA_GATEWAY_LISTEN_ADDR: 0.0.0.0:9500
       KRABKA_GATEWAY_ADVERTISED_ADDR: gateway:9500
     ports:
       - "${KRABKA_GATEWAY_PORT:-9500}:9500"
-    healthcheck:
-      test: ["CMD-SHELL", "nc -z 127.0.0.1 9500"]
-      interval: 1s
-      timeout: 1s
-      retries: 60
+
+# The named volume takes the owner of /var/lib/krabka from the image
+# (65532, `nonroot`), so the formatter and the broker can write to it.
+volumes:
+  broker-data:

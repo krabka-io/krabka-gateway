@@ -15,6 +15,14 @@ import (
 const (
 	integrationOptInEnv           = "KRABKA_GO_INTEGRATION"
 	integrationGatewayEndpointEnv = "KRABKA_GATEWAY_ENDPOINT"
+
+	// The compose images have no shell, so the harness has no container
+	// health check. The smoke polls the gateway from the host instead. The
+	// deadline covers the broker format step, the broker startup and the
+	// gateway restarts until the broker accepts connections.
+	gatewayReadyDeadline = 2 * time.Minute
+	gatewayPollInterval  = 500 * time.Millisecond
+	gatewayProbeTimeout  = 5 * time.Second
 )
 
 func TestComposeGatewaySmoke(t *testing.T) {
@@ -32,10 +40,30 @@ func TestComposeGatewaySmoke(t *testing.T) {
 		t.Fatalf("%s must name a live gateway endpoint, got %q", integrationGatewayEndpointEnv, endpoint)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), gatewayReadyDeadline)
 	defer cancel()
-	if err := checkGatewayHealthOverSDKTransport(ctx, endpoint); err != nil {
+	if err := waitForGatewayHealth(ctx, endpoint); err != nil {
 		t.Fatalf("gateway h2c health smoke through SDK transport failed: %v", err)
+	}
+}
+
+// waitForGatewayHealth retries the health check until it passes or ctx ends.
+// On timeout it returns the error of the last attempt.
+func waitForGatewayHealth(ctx context.Context, endpoint string) error {
+	ticker := time.NewTicker(gatewayPollInterval)
+	defer ticker.Stop()
+	for attempt := 1; ; attempt++ {
+		probeCtx, cancelProbe := context.WithTimeout(ctx, gatewayProbeTimeout)
+		err := checkGatewayHealthOverSDKTransport(probeCtx, endpoint)
+		cancelProbe()
+		if err == nil {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("gateway not healthy after %d attempts: %w", attempt, err)
+		case <-ticker.C:
+		}
 	}
 }
 

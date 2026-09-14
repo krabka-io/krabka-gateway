@@ -1,76 +1,54 @@
 #!/usr/bin/env bash
+# Checks the Go SDK compose harness without starting a container.
+#
+# The check reads the model that `docker compose config` resolves, with the
+# default images, and fails when:
+#
+# - the compose file does not resolve
+# - an image uses the `:edge` tag, which no workflow publishes
+# - a health check uses `CMD-SHELL`, which needs a shell that the images do
+#   not have
+# - the broker image is not pinned by digest
+# - the gateway image is not the tag that //packaging:image_load loads
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-IMAGE_BUILD="${ROOT}/packaging/BUILD.bazel"
-CI_WORKFLOW="${ROOT}/.github/workflows/ci.yml"
 COMPOSE_CONFIG="${ROOT}/sdks/go/testdata/docker-compose.yml"
-GO_INTEGRATION_TEST="${ROOT}/sdks/go/integration_smoke_test.go"
-SDK_GO_WORKFLOW="${ROOT}/.github/workflows/sdk-go.yml"
+IMAGE_BUILD="${ROOT}/packaging/BUILD.bazel"
 
-require_file() {
-  local path="$1"
-  if [[ -f "${path}" ]]; then
-    return 0
-  fi
-  printf 'missing required harness artifact: %s\n' "${path}" >&2
-  return 1
+fail() {
+  printf 'sdk-go harness: %s\n' "$*" >&2
+  exit 1
 }
 
-require_line() {
-  local path="$1"
-  local pattern="$2"
-  if grep -Eq -- "${pattern}" "${path}"; then
-    return 0
-  fi
-  printf 'artifact %s does not match required shape: %s\n' "${path}" "${pattern}" >&2
-  return 1
-}
+command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1 ||
+  fail 'docker compose is not installed'
+command -v jq >/dev/null 2>&1 || fail 'jq is not installed'
 
-require_file "${IMAGE_BUILD}"
-require_file "${CI_WORKFLOW}"
-require_file "${COMPOSE_CONFIG}"
-require_file "${GO_INTEGRATION_TEST}"
-require_file "${SDK_GO_WORKFLOW}"
+# Resolve with the defaults, not with overrides from the calling shell.
+model="$(
+  env -u KRABKA_BROKER_IMAGE -u KRABKA_GATEWAY_IMAGE \
+    docker compose -f "${COMPOSE_CONFIG}" config --format json
+)" || fail "docker compose config failed for ${COMPOSE_CONFIG}"
 
-require_line "${IMAGE_BUILD}" '"/usr/bin/krabka-gateway": "//crates/gateway:krabka-gateway"'
-require_line "${IMAGE_BUILD}" 'entrypoint = \["/usr/bin/krabka-gateway"\]'
-require_line "${IMAGE_BUILD}" 'repository = "krabka-io/krabka-gateway"'
+edge="$(jq -r '.services | to_entries[] | select(.value.image | test(":edge$")) | .key' <<<"${model}")"
+[[ -z "${edge}" ]] || fail "services use an unpublished :edge image: ${edge//$'\n'/ }"
 
-require_line "${CI_WORKFLOW}" 'bazel run -c opt //packaging:push'
+shell_checks="$(jq -r '.services | to_entries[] | select(.value.healthcheck.test[0]? == "CMD-SHELL") | .key' <<<"${model}")"
+[[ -z "${shell_checks}" ]] || fail "services use a CMD-SHELL health check: ${shell_checks//$'\n'/ }"
 
-require_line "${COMPOSE_CONFIG}" '^  broker:$'
-require_line "${COMPOSE_CONFIG}" '^  gateway:$'
-require_line "${COMPOSE_CONFIG}" 'image: \$\{KRABKA_BROKER_IMAGE:-ghcr\.io/krabka-io/krabka-broker:edge\}'
-require_line "${COMPOSE_CONFIG}" 'image: \$\{KRABKA_GATEWAY_IMAGE:-ghcr\.io/krabka-io/krabka-gateway:edge\}'
-require_line "${COMPOSE_CONFIG}" 'condition: service_healthy'
-require_line "${COMPOSE_CONFIG}" 'KRABKA_BOOTSTRAP_SERVERS: broker:9092'
-require_line "${COMPOSE_CONFIG}" 'KRABKA_GATEWAY_LISTEN_ADDR: 0\.0\.0\.0:9500'
-require_line "${COMPOSE_CONFIG}" 'KRABKA_GATEWAY_ADVERTISED_ADDR: gateway:9500'
-require_line "${COMPOSE_CONFIG}" '"\$\{KRABKA_BROKER_PORT:-9092\}:9092"'
-require_line "${COMPOSE_CONFIG}" '"\$\{KRABKA_GATEWAY_PORT:-9500\}:9500"'
-require_line "${COMPOSE_CONFIG}" 'nc -z 127\.0\.0\.1 9092'
-require_line "${COMPOSE_CONFIG}" 'nc -z 127\.0\.0\.1 9500'
+broker_image="$(jq -r '.services.broker.image' <<<"${model}")"
+[[ "${broker_image}" =~ ^ghcr\.io/krabka-io/krabka-broker@sha256:[0-9a-f]{64}$ ]] ||
+  fail "the broker image is not pinned by digest: ${broker_image}"
 
-require_line "${GO_INTEGRATION_TEST}" '^//go:build integration$'
-require_line "${GO_INTEGRATION_TEST}" 'KRABKA_GO_INTEGRATION'
-require_line "${GO_INTEGRATION_TEST}" 'KRABKA_GATEWAY_ENDPOINT'
-require_line "${GO_INTEGRATION_TEST}" 'checkGatewayHealthOverSDKTransport'
+format_image="$(jq -r '.services["broker-format"].image' <<<"${model}")"
+[[ "${format_image}" == "${broker_image}" ]] ||
+  fail "broker-format runs ${format_image}, but broker runs ${broker_image}"
 
-require_line "${SDK_GO_WORKFLOW}" 'KRABKA_GO_INTEGRATION=1'
-require_line "${SDK_GO_WORKFLOW}" 'KRABKA_GATEWAY_ENDPOINT="http://127\.0\.0\.1:\$\{KRABKA_GATEWAY_PORT:-9500\}"'
-require_line "${SDK_GO_WORKFLOW}" 'go test -tags integration ./\.\.\.'
+loaded_tag="$(sed -n 's/^IMAGE_TAG = "\(.*\)"$/\1/p' "${IMAGE_BUILD}")"
+[[ -n "${loaded_tag}" ]] || fail "no IMAGE_TAG in ${IMAGE_BUILD}"
+gateway_image="$(jq -r '.services.gateway.image' <<<"${model}")"
+[[ "${gateway_image}" == "${loaded_tag}" ]] ||
+  fail "the gateway image is ${gateway_image}, but //packaging:image_load loads ${loaded_tag}"
 
-if command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; then
-  docker compose -f "${COMPOSE_CONFIG}" config --quiet
-else
-  printf 'note: docker compose is not installed; static compose checks passed, live harness remains external\n' >&2
-fi
-
-if command -v ruby >/dev/null 2>&1; then
-  ruby -e 'require "yaml"; YAML.load_file(ARGV.fetch(0))' "${SDK_GO_WORKFLOW}" >/dev/null
-else
-  printf 'note: ruby is not installed; skipping sdk-go.yml YAML parse check\n' >&2
-fi
-
-printf 'Go SDK harness artifacts are present and coherent for default CI checks\n'
+printf 'sdk-go harness: compose resolves; broker %s; gateway %s\n' "${broker_image}" "${gateway_image}"
