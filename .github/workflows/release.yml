@@ -104,14 +104,21 @@ jobs:
         run: |
           git fetch --tags --force origin
 
-          # `latest` means the newest release. A patch release of an older
-          # minor version leaves `latest` where it is.
-          newest="$(git tag --list 'v*' | sort -V | tail -1)"
           tags=("${GITHUB_REF_NAME}")
-          if [ "${newest}" = "${GITHUB_REF_NAME}" ]; then
-            tags+=(latest)
+
+          # `latest` means the newest stable release. `sort -V` ranks `v1.0.0`
+          # below `v1.0.0-rc.1`, so only stable tags take part, and a
+          # prerelease never moves `latest`. A patch release of an older minor
+          # version leaves `latest` where it is.
+          if [[ "${GITHUB_REF_NAME}" == *-* ]]; then
+            echo "::notice::${GITHUB_REF_NAME} is a prerelease; leaving :latest where it is"
           else
-            echo "::notice::${GITHUB_REF_NAME} is not the newest v* tag (${newest}); leaving :latest where it is"
+            newest="$(git tag --list 'v*' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1)"
+            if [ "${newest}" = "${GITHUB_REF_NAME}" ]; then
+              tags+=(latest)
+            else
+              echo "::notice::${GITHUB_REF_NAME} is not the newest stable tag (${newest}); leaving :latest where it is"
+            fi
           fi
 
           arguments=()
