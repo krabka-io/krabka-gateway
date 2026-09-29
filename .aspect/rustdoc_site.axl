@@ -40,17 +40,109 @@ _LANDING_HEAD = [
 
 _LANDING_TAIL = ["</tbody>", "</table>", "</html>"]
 
-def manifest_field(lines, field):
-    """The value `field` is assigned on its first `field = "..."` line.
+_HEX_DIGITS = "0123456789abcdefABCDEF"
 
-    The manifests here open with `[package]`, so the first assignment is the
-    package's own. A value holding a quote keeps it: the match runs up to the line's last
-    quote, so the landing page carries such a description through verbatim.
+# What a TOML basic string's single-character escapes stand for.
+_SIMPLE_ESCAPES = {
+    '"': '"',
+    "\\": "\\",
+    "n": "\n",
+    "t": "\t",
+    "r": "\r",
+    "b": chr(8),
+    "f": chr(12),
+}
+
+def html_escape(text):
+    """`text` with the characters HTML gives meaning to written as entities.
+
+    `&` goes first, so the ampersands the other replacements introduce are not
+    escaped a second time.
     """
-    prefix = field + ' = "'
+    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;").replace("'", "&#39;")
+
+def _decode_basic_string(body):
+    """The value of the TOML basic string whose text after the opening quote is `body`.
+
+    Reads up to the first unescaped quote and ignores whatever follows it (a
+    trailing comment, say). Returns None when the string is malformed: no
+    closing quote, an unknown escape, a truncated or non-hex
+    `\\u`/`\\U` escape, or a code point that is not a Unicode scalar value.
+    """
+    out = []
+    skip = 0
+    for i in range(len(body)):
+        if skip > 0:
+            skip -= 1
+            continue
+        char = body[i]
+        if char == '"':
+            return "".join(out)
+        if char != "\\":
+            out.append(char)
+            continue
+        if i + 1 >= len(body):
+            return None
+        kind = body[i + 1]
+        if kind in _SIMPLE_ESCAPES:
+            out.append(_SIMPLE_ESCAPES[kind])
+            skip = 1
+        elif kind == "u" or kind == "U":
+            width = 4 if kind == "u" else 8
+            digits = body[i + 2:i + 2 + width]
+            if len(digits) != width:
+                return None
+            for digit in digits.elems():
+                if digit not in _HEX_DIGITS:
+                    return None
+            code = int(digits, 16)
+            if code > 0x10FFFF or (code >= 0xD800 and code <= 0xDFFF):
+                return None
+            out.append(chr(code))
+            skip = 1 + width
+        else:
+            return None
+    return None
+
+def _is_package_header(stripped):
+    """Whether the stripped manifest line opens the `[package]` table."""
+    if not stripped.startswith("[package]"):
+        return False
+    rest = stripped[len("[package]"):].lstrip()
+    return rest == "" or rest.startswith("#")
+
+def manifest_field(lines, field):
+    """The value `field` is assigned on its first string assignment in `[package]`.
+
+    Only the `[package]` table is read: a key before any table header, or in
+    another table such as `[dependencies]`, is skipped. A line may be indented,
+    may put any whitespace (or none) around the `=`, and may end in a `# comment`
+    after the closing quote. A basic string (`"..."`) is decoded as TOML does:
+    `\\"`, `\\\\`, `\\n`, `\\t`, `\\r`, `\\b`, `\\f`, `\\uXXXX` and `\\UXXXXXXXX` become
+    the characters they name. A literal string (`'...'`) has no escapes and is
+    returned as written. Anything else reads as "": a dotted key such as
+    `field.workspace = true`, a value that is not a one-line string, or a
+    malformed string.
+    """
+    in_package = False
     for line in lines:
-        if line.startswith(prefix) and line.endswith('"') and len(line) > len(prefix):
-            return line[len(prefix):-1]
+        stripped = line.lstrip()
+        if stripped.startswith("["):
+            in_package = _is_package_header(stripped)
+            continue
+        if not in_package or not stripped.startswith(field):
+            continue
+        rest = stripped[len(field):].lstrip()
+        if not rest.startswith("="):
+            continue
+        value = rest[1:].lstrip()
+        if value.startswith('"'):
+            decoded = _decode_basic_string(value[1:])
+            return decoded if decoded != None else ""
+        if value.startswith("'"):
+            end = value.find("'", 1)
+            return value[1:end] if end > 0 else ""
+        return ""
     return ""
 
 def snake(name):
@@ -79,18 +171,21 @@ def redirect_page(name, module):
     return "\n".join([
         "<!doctype html>",
         '<meta charset="utf-8">',
-        '<meta http-equiv="refresh" content="0; url=%s/index.html">' % module,
-        "<title>%s</title>" % name,
-        '<a href="%s/index.html">%s</a>' % (module, name),
+        '<meta http-equiv="refresh" content="0; url=%s/index.html">' % html_escape(module),
+        "<title>%s</title>" % html_escape(name),
+        '<a href="%s/index.html">%s</a>' % (html_escape(module), html_escape(name)),
     ]) + "\n"
 
 def landing_row(row):
-    """The landing page's table row for one `struct(name, snake, description)`."""
+    """The landing page's table row for one `struct(name, snake, description)`.
+
+    The text comes from a manifest, so it is HTML-escaped.
+    """
     return '<tr><td><a href="%s/%s/index.html"><code>%s</code></a></td><td>%s</td></tr>' % (
-        row.name,
-        row.snake,
-        row.name,
-        row.description,
+        html_escape(row.name),
+        html_escape(row.snake),
+        html_escape(row.name),
+        html_escape(row.description),
     )
 
 def landing_page(rows):
@@ -117,6 +212,46 @@ def problems(crates):
         elif not crate.has_index:
             found.append("%s has no %s/index.html" % (crate.rustdoc, crate.snake))
     return found
+
+def normalize_path(path):
+    """`path` as an absolute path with `.`, `..` and duplicate slashes collapsed.
+
+    A `..` at the root stays at the root, as it does for the OS. Symlinks are
+    not resolved: this is text only, with no filesystem access.
+    """
+    parts = []
+    for part in path.split("/"):
+        if part == "" or part == ".":
+            continue
+        if part == "..":
+            if parts:
+                parts.pop()
+            continue
+        parts.append(part)
+    return "/" + "/".join(parts)
+
+# Top-level entries of the checkout that the site directory must never be, or
+# sit inside, because `rustdoc-site` empties it before writing.
+_PROTECTED_TOP_LEVEL = ["crates", ".git", ".github", ".aspect", "bazel"]
+
+def output_problem(root, out):
+    """Why `out` is not safe to empty and write the site into, or "" when it is.
+
+    Both paths are normalized first. `out` is safe only when it is a strict
+    descendant of `root` and its first component below `root` is neither a
+    source directory of the checkout nor a `bazel-*` output symlink. That
+    rejects the root itself, its ancestors, `/`, and any path outside it.
+    """
+    root_parts = [part for part in normalize_path(root).split("/") if part]
+    out_parts = [part for part in normalize_path(out).split("/") if part]
+    if out_parts == root_parts:
+        return "refusing to use the repository root as the output directory"
+    if len(out_parts) < len(root_parts) or out_parts[:len(root_parts)] != root_parts:
+        return "output directory %s is not inside the repository %s" % (normalize_path(out), normalize_path(root))
+    top = out_parts[len(root_parts)]
+    if top in _PROTECTED_TOP_LEVEL or top.startswith("bazel-"):
+        return "refusing to use %s, part of the checkout, as the output directory" % normalize_path(out)
+    return ""
 
 def resolve_output(root, output):
     """`output` as an absolute path, a relative one taken from the repo root."""
@@ -194,7 +329,11 @@ def _impl(ctx: TaskContext) -> int:
     if not ctx.args.output:
         ctx.std.io.stderr.write("no output directory: pass --output\n")
         return 2
-    out = resolve_output(root, ctx.args.output)
+    out = normalize_path(resolve_output(root, ctx.args.output))
+    unsafe = output_problem(root, out)
+    if unsafe:
+        ctx.std.io.stderr.write(unsafe + "\n")
+        return 2
 
     crates = _crates(fs, root)
     if not crates:
