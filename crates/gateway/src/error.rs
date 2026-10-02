@@ -10,8 +10,6 @@ use krabka_client_producer::ProducerError;
 pub enum GatewayError {
     #[error("producer error: {0}")]
     Producer(#[from] ProducerError),
-    #[error("producer send was canceled before acknowledgement")]
-    ProducerCanceled,
     #[error("consumer error: {0}")]
     Consumer(#[from] ConsumerError),
     #[error("dedup partition not owned by this replica or still warming up")]

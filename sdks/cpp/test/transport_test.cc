@@ -116,6 +116,7 @@ int main() {
   assert(!header_value(queue_acquire_http, "connect-protocol-version").has_value());
   assert(queue_acquire_http.body == std::vector<std::uint8_t>(
                                         {0x0a, 0x01, 'g', 0x12, 0x01, 't', 0x18, 0x01,
+                                         0x20, 0xe8, 0x07,
                                          0x2a, 0x06, 'a', 'c', 't', 'u', 'a', 'l',
                                          0x30, 0xb0, 0xea, 0x01}));
   assert(queue_acquire_http.end_stream_after_body);

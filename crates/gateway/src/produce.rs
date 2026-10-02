@@ -257,11 +257,7 @@ impl ProduceCore {
             Acks::One => &self.producer_one,
             Acks::Zero => &self.producer_zero,
         };
-        let rx = producer.send(prec).await;
-        let meta = rx
-            .await
-            .map_err(|_| GatewayError::ProducerCanceled)?
-            .map_err(GatewayError::Producer)?;
+        let meta = producer.send(prec).await.map_err(GatewayError::Producer)?;
         Ok(RecordOutcome {
             partition: PartitionIndex(meta.partition),
             offset: Offset(meta.offset),

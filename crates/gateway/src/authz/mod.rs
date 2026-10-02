@@ -90,12 +90,13 @@ impl GatewayAuthz {
             addrs,
             krabka_client_core::ConnectionOptions {
                 dns_timeout: krabka_client_core::ClientDnsTimeout::default(),
-                connect_timeout: krabka_units::secs(5),
+                socket_connection_setup_timeout: krabka_units::secs(5),
                 request_timeout: krabka_units::secs(30),
                 client_id: "krabka-operator".to_owned(),
                 dispatch_queue_capacity: policy.client_dispatch_queue_capacity,
                 frame_max: policy.client_frame_max,
                 security: security.map(Box::new),
+                ..Default::default()
             },
         )
         .await
@@ -104,15 +105,16 @@ impl GatewayAuthz {
             .describe_acls(&krabka_client_admin::AclEntryFilter::default())
             .await
             .map_err(|e| crate::error::GatewayError::Other(format!("describe_acls: {e}")))?;
-        Ok(entries.into_iter().map(acl_entry_from_admin).collect())
+        entries.into_iter().map(acl_entry_from_admin).collect()
     }
 }
 
 /// Convert a `krabka_client_admin::AclEntry` into a `krabka_metadata::AclEntry`.
 ///
-/// The two types have the same field names and the same enum variant sets. The
-/// admin crate keeps local copies to avoid a broker dependency.
-fn acl_entry_from_admin(e: krabka_client_admin::AclEntry) -> krabka_metadata::AclEntry {
+/// Reject filter-only patterns so a malformed snapshot cannot change access.
+fn acl_entry_from_admin(
+    e: krabka_client_admin::AclEntry,
+) -> Result<krabka_metadata::AclEntry, crate::error::GatewayError> {
     use krabka_client_admin::{
         AclOperation as AO, PatternType as PT, PermissionType as Perm, ResourceType as RT,
     };
@@ -126,10 +128,17 @@ fn acl_entry_from_admin(e: krabka_client_admin::AclEntry) -> krabka_metadata::Ac
         RT::Group => MRT::Group,
         RT::Cluster => MRT::Cluster,
         RT::TransactionalId => MRT::TransactionalId,
+        RT::DelegationToken => MRT::DelegationToken,
+        RT::User => MRT::User,
     };
     let pattern_type = match e.pattern_type {
         PT::Literal => MPT::Literal,
         PT::Prefixed => MPT::Prefixed,
+        PT::Match => {
+            return Err(crate::error::GatewayError::Other(
+                "DescribeAcls returned a filter-only Match pattern".into(),
+            ));
+        }
     };
     let operation = match e.operation {
         AO::All => MAO::All,
@@ -144,13 +153,15 @@ fn acl_entry_from_admin(e: krabka_client_admin::AclEntry) -> krabka_metadata::Ac
         AO::AlterConfigs => MAO::AlterConfigs,
         AO::IdempotentWrite => MAO::IdempotentWrite,
         AO::TwoPhaseCommit => MAO::TwoPhaseCommit,
+        AO::CreateTokens => MAO::CreateTokens,
+        AO::DescribeTokens => MAO::DescribeTokens,
     };
     let permission_type = match e.permission_type {
         Perm::Allow => MPerm::Allow,
         Perm::Deny => MPerm::Deny,
     };
 
-    ME {
+    Ok(ME {
         resource_type,
         resource_name: e.resource_name,
         pattern_type,
@@ -158,7 +169,7 @@ fn acl_entry_from_admin(e: krabka_client_admin::AclEntry) -> krabka_metadata::Ac
         host: e.host,
         operation,
         permission_type,
-    }
+    })
 }
 
 #[cfg(test)]
@@ -178,7 +189,7 @@ mod tests {
             operation: krabka_client_admin::AclOperation::TwoPhaseCommit,
             permission_type: krabka_client_admin::PermissionType::Allow,
         };
-        let meta = acl_entry_from_admin(admin);
+        let meta = acl_entry_from_admin(admin).unwrap();
         assert2::assert!(
             meta == krabka_metadata::AclEntry {
                 resource_type: krabka_metadata::ResourceType::TransactionalId,
@@ -190,5 +201,45 @@ mod tests {
                 permission_type: krabka_metadata::PermissionType::Allow,
             }
         );
+    }
+
+    #[test]
+    fn token_acl_conversion_preserves_denies_and_rejects_filter_patterns() {
+        use krabka_client_admin::{AclOperation, PatternType, PermissionType, ResourceType};
+        let entries = [
+            (ResourceType::DelegationToken, AclOperation::DescribeTokens),
+            (ResourceType::User, AclOperation::CreateTokens),
+        ];
+        for (resource_type, operation) in entries {
+            let mut admin = krabka_client_admin::AclEntry {
+                resource_type,
+                resource_name: "alice".into(),
+                pattern_type: PatternType::Literal,
+                principal: "User:alice".into(),
+                host: "*".into(),
+                operation,
+                permission_type: PermissionType::Deny,
+            };
+            let meta = acl_entry_from_admin(admin.clone()).unwrap();
+            assert2::assert!(meta.permission_type == krabka_metadata::PermissionType::Deny);
+            assert2::assert!(
+                meta.resource_type
+                    == match resource_type {
+                        ResourceType::DelegationToken =>
+                            krabka_metadata::ResourceType::DelegationToken,
+                        _ => krabka_metadata::ResourceType::User,
+                    }
+            );
+            assert2::assert!(
+                meta.operation
+                    == match operation {
+                        AclOperation::DescribeTokens =>
+                            krabka_metadata::AclOperation::DescribeTokens,
+                        _ => krabka_metadata::AclOperation::CreateTokens,
+                    }
+            );
+            admin.pattern_type = PatternType::Match;
+            assert2::assert!(acl_entry_from_admin(admin).is_err());
+        }
     }
 }

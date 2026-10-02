@@ -34,7 +34,7 @@ async fn publish(producer: &Producer, node_id: &str, info: &NodeInfo) {
         headers: vec![],
         timestamp_ms: None,
     };
-    producer.send(rec).await.await.unwrap().unwrap();
+    producer.send(rec).await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -176,7 +176,7 @@ async fn run_membership_tombstone_and_malformed_skip() {
         headers: vec![],
         timestamp_ms: None,
     };
-    producer.send(malformed).await.await.unwrap().unwrap();
+    producer.send(malformed).await.unwrap();
 
     // Publish a TOMBSTONE for node-a (None value => remove from store).
     let tombstone = ProducerRecord {
@@ -187,7 +187,7 @@ async fn run_membership_tombstone_and_malformed_skip() {
         headers: vec![],
         timestamp_ms: None,
     };
-    producer.send(tombstone).await.await.unwrap().unwrap();
+    producer.send(tombstone).await.unwrap();
 
     let store = Arc::new(MembershipStore::new());
     let token = CancellationToken::new();

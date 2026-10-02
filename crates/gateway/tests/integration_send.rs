@@ -25,13 +25,17 @@ async fn create_topic(bootstrap: &str, name: &str, partitions: i32) {
         .await
         .expect("admin");
     let spec = CreateTopicSpec {
+        replica_assignments: std::collections::BTreeMap::new(),
         name: name.to_string(),
         partitions,
         replicas: 1,
         configs: BTreeMap::new(),
     };
     admin
-        .create_topics(&[spec], krabka_units::secs(10))
+        .create_topics(
+            &[spec],
+            krabka_client_admin::TopicMutationOptions::with_timeout(krabka_units::secs(10)),
+        )
         .await
         .expect("create_topics");
 }

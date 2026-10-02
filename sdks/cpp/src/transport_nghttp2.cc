@@ -385,6 +385,7 @@ std::vector<std::uint8_t> encode_queue_acquire_request(const std::string& topic,
   append_bytes(out, 1, group);
   append_bytes(out, 2, topic);
   if (max != 0) append_int(out, 3, max);
+  append_int(out, 4, 1000);
   if (!session_id.empty()) append_bytes(out, 5, session_id);
   if (lock_duration_ms != 0) append_int(out, 6, lock_duration_ms);
   return out;

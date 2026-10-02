@@ -205,6 +205,7 @@ final class QueuesTest {
         assertEquals("workers", acquireRequest.getGroupId());
         assertEquals(List.of("queue"), acquireRequest.getTopicsList());
         assertEquals(1, acquireRequest.getMaxMessages());
+        assertEquals(1_000, acquireRequest.getWaitMs());
         assertEquals(30_000, acquireRequest.getLockDurationMs());
         assertEquals("actual-session", acquireRequest.getSessionId());
 

@@ -89,7 +89,7 @@ async function acquire(
         groupId: acquireOptions.group,
         topics: [topic],
         maxMessages: acquireOptions.max ?? 1,
-        waitMs: 0,
+        waitMs: 1_000,
         sessionId: acquireOptions.sessionId,
         lockDurationMs: BigInt(DEFAULT_QUEUE_LOCK_DURATION_MS),
       }),

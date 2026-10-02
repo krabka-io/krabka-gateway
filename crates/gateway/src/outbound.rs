@@ -120,7 +120,7 @@ pub async fn run_subscription_with_policy(
         .subscribe(sub.source_topics.clone())
         .isolation_level(IsolationLevel::ReadCommitted)
         .auto_offset_reset(AutoOffsetReset::Earliest)
-        .assignor(Assignor::CooperativeSticky)
+        .assignors(vec![Assignor::CooperativeSticky])
         .maybe_security(security)
         .build()
         .await?;
@@ -573,26 +573,20 @@ async fn dead_letter(
         timestamp_ms: None,
     };
 
-    match producer.send(prec).await.await {
-        Ok(Ok(_)) => tracing::warn!(
+    match producer.send(prec).await {
+        Ok(_) => tracing::warn!(
             target: "gateway::audit",
             subscription = %sub.name,
             event = %event_id,
             dlq = %dlq,
             "outbound delivery exhausted; dead-lettered",
         ),
-        Ok(Err(e)) => tracing::warn!(
+        Err(e) => tracing::warn!(
             subscription = %sub.name,
             event = %event_id,
             dlq = %dlq,
             error = %e,
             "outbound dead-letter produce failed",
-        ),
-        Err(_) => tracing::warn!(
-            subscription = %sub.name,
-            event = %event_id,
-            dlq = %dlq,
-            "outbound dead-letter produce canceled",
         ),
     }
 }
@@ -684,6 +678,7 @@ mod tests {
             offset: 42,
             leader_epoch: 0,
             timestamp: 1_700_000_000_000,
+            timestamp_type: krabka_client_consumer::TimestampType::CreateTime,
             key: Some(Bytes::from_static(b"k1")),
             value: value.map(|v| Bytes::from(v.to_vec())),
             headers: vec![],

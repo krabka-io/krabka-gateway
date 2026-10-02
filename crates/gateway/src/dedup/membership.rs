@@ -161,7 +161,7 @@ impl MembershipStore {
             .subscribe(vec![membership_topic])
             .isolation_level(IsolationLevel::ReadCommitted)
             .auto_offset_reset(AutoOffsetReset::Earliest)
-            .assignor(krabka_client_consumer::Assignor::CooperativeSticky)
+            .assignors(vec![krabka_client_consumer::Assignor::CooperativeSticky])
             .maybe_security(security)
             .build()
             .await?;
@@ -293,8 +293,6 @@ impl MembershipPublisher {
         self.producer
             .send(rec)
             .await
-            .await
-            .map_err(|_| GatewayError::ProducerCanceled)?
             .map_err(GatewayError::Producer)?;
         Ok(())
     }
