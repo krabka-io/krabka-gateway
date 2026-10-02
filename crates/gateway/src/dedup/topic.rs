@@ -5,7 +5,7 @@
 
 use std::collections::BTreeMap;
 
-use krabka_client_admin::{AdminClient, CreateTopicSpec};
+use krabka_client_admin::{AdminClient, CreateTopicSpec, TopicMutationOptions};
 use krabka_units::prelude::*;
 
 use crate::{config::GatewayRuntimeConfig, error::GatewayError};
@@ -155,12 +155,13 @@ fn admin_options(
 ) -> krabka_client_core::ConnectionOptions {
     krabka_client_core::ConnectionOptions {
         dns_timeout: krabka_client_core::ClientDnsTimeout::default(),
-        connect_timeout: secs(5),
+        socket_connection_setup_timeout: secs(5),
         request_timeout: secs(30),
         client_id: "krabka-operator".to_owned(),
         dispatch_queue_capacity: runtime.client_dispatch_queue_capacity,
         frame_max: runtime.client_frame_max,
         security: security.map(Box::new),
+        ..Default::default()
     }
 }
 
@@ -176,9 +177,13 @@ async fn create_with_rf(
         partitions: topic_partition_count(partitions)?,
         replicas: i32::from(policy.replication_factor),
         configs: configs.clone(),
+        ..Default::default()
     };
     let outcomes = admin
-        .create_topics(&[spec], policy.create_timeout)
+        .create_topics(
+            &[spec],
+            TopicMutationOptions::with_timeout(policy.create_timeout),
+        )
         .await
         .map_err(|e| GatewayError::Other(format!("create_topics: {e}")))?;
     for o in outcomes {

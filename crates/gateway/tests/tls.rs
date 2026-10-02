@@ -16,7 +16,7 @@ use std::{
 
 use bytes::Bytes;
 use krabka_broker::{Broker, BrokerConfig, BrokerHandle};
-use krabka_client_admin::{AdminClient, CreateTopicSpec};
+use krabka_client_admin::{AdminClient, CreateTopicSpec, TopicMutationOptions};
 use krabka_client_consumer::{AutoOffsetReset, Consumer, IsolationLevel};
 use krabka_gateway::{
     codec::RawCodec,
@@ -471,8 +471,9 @@ async fn tls_forward_between_two_gateways() {
                 partitions: 1,
                 replicas: 1,
                 configs: BTreeMap::new(),
+                ..Default::default()
             }],
-            krabka_units::secs(10),
+            TopicMutationOptions::with_timeout(krabka_units::secs(10)),
         )
         .await
         .unwrap();

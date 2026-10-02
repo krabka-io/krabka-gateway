@@ -442,6 +442,7 @@ fn ack_record(entry: &pb::QueueAckEntry) -> ShareConsumerRecord {
         partition: entry.partition,
         offset: entry.offset,
         timestamp: 0,
+        timestamp_type: krabka_client_consumer::TimestampType::CreateTime,
         key: None,
         value: None,
         headers: Vec::new(),
@@ -602,6 +603,7 @@ mod tests {
             partition: 2,
             offset: 7,
             timestamp: 11,
+            timestamp_type: krabka_client_consumer::TimestampType::CreateTime,
             key: None,
             value: None,
             headers: vec![
@@ -637,6 +639,7 @@ mod tests {
             partition: 2,
             offset: 8,
             timestamp: 12,
+            timestamp_type: krabka_client_consumer::TimestampType::CreateTime,
             key: None,
             value: Some(bytes::Bytes::new()),
             headers: Vec::new(),

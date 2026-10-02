@@ -230,12 +230,13 @@ async fn keyed_record_forwards_to_owner_and_dedups() {
     admin
         .create_topics(
             &[CreateTopicSpec {
+                replica_assignments: std::collections::BTreeMap::new(),
                 name: USER_TOPIC.into(),
                 partitions: 1,
                 replicas: 1,
                 configs: BTreeMap::new(),
             }],
-            krabka_units::secs(10),
+            krabka_client_admin::TopicMutationOptions::with_timeout(krabka_units::secs(10)),
         )
         .await
         .unwrap();

@@ -237,12 +237,7 @@ impl DedupEngine {
         let sent: Result<(RecordMetadata, ClaimValue), GatewayError> = async {
             // 1. data record → user topic
             let data = to_producer_record(rec, value);
-            let meta = producer
-                .send(data)
-                .await
-                .await
-                .map_err(|_| GatewayError::ProducerCanceled)?
-                .map_err(GatewayError::Producer)?;
+            let meta = producer.send(data).await.map_err(GatewayError::Producer)?;
 
             // 2. claim → dedup topic (partition p), key = idempotency key
             let claim = ClaimValue {
@@ -261,8 +256,6 @@ impl DedupEngine {
             producer
                 .send(claim_rec)
                 .await
-                .await
-                .map_err(|_| GatewayError::ProducerCanceled)?
                 .map_err(GatewayError::Producer)?;
 
             Ok((meta, claim))

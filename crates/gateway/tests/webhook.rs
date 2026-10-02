@@ -288,12 +288,13 @@ async fn valid_hmac_produces() {
     admin
         .create_topics(
             &[CreateTopicSpec {
+                replica_assignments: std::collections::BTreeMap::new(),
                 name: topic.into(),
                 partitions: 1,
                 replicas: 1,
                 configs: BTreeMap::new(),
             }],
-            krabka_units::secs(10),
+            krabka_client_admin::TopicMutationOptions::with_timeout(krabka_units::secs(10)),
         )
         .await
         .unwrap();
@@ -352,12 +353,13 @@ async fn invalid_hmac_rejected() {
     admin
         .create_topics(
             &[CreateTopicSpec {
+                replica_assignments: std::collections::BTreeMap::new(),
                 name: topic.into(),
                 partitions: 1,
                 replicas: 1,
                 configs: BTreeMap::new(),
             }],
-            krabka_units::secs(10),
+            krabka_client_admin::TopicMutationOptions::with_timeout(krabka_units::secs(10)),
         )
         .await
         .unwrap();
@@ -415,12 +417,13 @@ async fn jsonpath_idempotency_redelivery_dedups() {
     admin
         .create_topics(
             &[CreateTopicSpec {
+                replica_assignments: std::collections::BTreeMap::new(),
                 name: topic.into(),
                 partitions: 1,
                 replicas: 1,
                 configs: BTreeMap::new(),
             }],
-            krabka_units::secs(10),
+            krabka_client_admin::TopicMutationOptions::with_timeout(krabka_units::secs(10)),
         )
         .await
         .unwrap();
@@ -507,12 +510,13 @@ async fn header_idempotency_works() {
     admin
         .create_topics(
             &[CreateTopicSpec {
+                replica_assignments: std::collections::BTreeMap::new(),
                 name: topic.into(),
                 partitions: 1,
                 replicas: 1,
                 configs: BTreeMap::new(),
             }],
-            krabka_units::secs(10),
+            krabka_client_admin::TopicMutationOptions::with_timeout(krabka_units::secs(10)),
         )
         .await
         .unwrap();
@@ -596,12 +600,13 @@ async fn generic_produce_route() {
     admin
         .create_topics(
             &[CreateTopicSpec {
+                replica_assignments: std::collections::BTreeMap::new(),
                 name: topic.into(),
                 partitions: 1,
                 replicas: 1,
                 configs: BTreeMap::new(),
             }],
-            krabka_units::secs(10),
+            krabka_client_admin::TopicMutationOptions::with_timeout(krabka_units::secs(10)),
         )
         .await
         .unwrap();
@@ -853,12 +858,13 @@ async fn simpleacl_denies_webhook_principal() {
     admin
         .create_topics(
             &[CreateTopicSpec {
+                replica_assignments: std::collections::BTreeMap::new(),
                 name: topic.into(),
                 partitions: 1,
                 replicas: 1,
                 configs: BTreeMap::new(),
             }],
-            krabka_units::secs(10),
+            krabka_client_admin::TopicMutationOptions::with_timeout(krabka_units::secs(10)),
         )
         .await
         .unwrap();

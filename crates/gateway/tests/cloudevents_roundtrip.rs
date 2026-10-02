@@ -91,12 +91,13 @@ async fn create_topic(bootstrap: &str, topic: &str) {
     admin
         .create_topics(
             &[CreateTopicSpec {
+                replica_assignments: std::collections::BTreeMap::new(),
                 name: topic.to_owned(),
                 partitions: 1,
                 replicas: 1,
                 configs: BTreeMap::new(),
             }],
-            secs(10),
+            krabka_client_admin::TopicMutationOptions::with_timeout(secs(10)),
         )
         .await
         .expect("topic is created");

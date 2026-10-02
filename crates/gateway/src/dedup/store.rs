@@ -166,7 +166,7 @@ impl DedupStore {
             .subscribe(vec![dedup_topic.clone()])
             .isolation_level(IsolationLevel::ReadCommitted)
             .auto_offset_reset(AutoOffsetReset::Earliest)
-            .assignor(krabka_client_consumer::Assignor::CooperativeSticky)
+            .assignors(vec![krabka_client_consumer::Assignor::CooperativeSticky])
             .maybe_security(security)
             .build()
             .await?;
@@ -285,11 +285,7 @@ impl DedupStore {
             headers: vec![],
             timestamp_ms: None,
         };
-        let meta = producer
-            .send(prec)
-            .await
-            .await
-            .map_err(|_| GatewayError::ProducerCanceled)?;
+        let meta = producer.send(prec).await;
         meta.map_err(GatewayError::Producer)?;
         self.apply(key.to_string(), value.clone());
         Ok(())

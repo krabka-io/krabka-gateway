@@ -425,6 +425,7 @@ async fn create_topics(bootstrap: &str, topic_names: &[String]) -> Result<(), Ha
     let specs = topic_names
         .iter()
         .map(|name| CreateTopicSpec {
+            replica_assignments: std::collections::BTreeMap::new(),
             name: name.clone(),
             partitions: 1,
             replicas: 1,
@@ -432,7 +433,10 @@ async fn create_topics(bootstrap: &str, topic_names: &[String]) -> Result<(), Ha
         })
         .collect::<Vec<_>>();
     admin
-        .create_topics(&specs, millis(10_000))
+        .create_topics(
+            &specs,
+            krabka_client_admin::TopicMutationOptions::with_timeout(millis(10_000)),
+        )
         .await
         .map(|_| ())
         .map_err(HarnessError::Admin)

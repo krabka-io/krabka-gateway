@@ -414,7 +414,7 @@ fn build_broker_security(
     ca: Option<&PathBuf>,
     sni: Option<&String>,
 ) -> anyhow::Result<Option<krabka_client_core::security::ClientSecurity>> {
-    use krabka_client_core::security::{ClientSecurity, TlsConnectorConfig};
+    use krabka_client_core::security::{ClientSecurity, KeyStore, TlsConnectorConfig, TrustStore};
     use krabka_security::ListenerProtocol;
 
     match (cert, key) {
@@ -422,13 +422,17 @@ fn build_broker_security(
             let server_name = sni
                 .cloned()
                 .context("--broker-tls-server-name required with broker TLS")?;
+            let mut tls = TlsConnectorConfig::default();
+            tls.trust_store = ca.cloned().map(TrustStore::PemFile).unwrap_or_default();
+            tls.server_name = server_name;
+            tls.key_store = Some(KeyStore::PemFiles {
+                certificate_chain: cert_path.clone(),
+                private_key: key_path.clone(),
+                key_password: None,
+            });
             Ok(Some(ClientSecurity {
                 protocol: ListenerProtocol::Ssl,
-                tls: Some(TlsConnectorConfig {
-                    trust_roots_pem: ca.cloned(),
-                    server_name,
-                    client_identity: Some((cert_path.clone(), key_path.clone())),
-                }),
+                tls: Some(tls),
                 sasl: None,
                 sasl_host: None,
             }))
@@ -1045,8 +1049,15 @@ mod tests {
         let tls = sec.tls.expect("tls should be set");
         assert2::assert!(sec.protocol == ListenerProtocol::Ssl);
         assert2::assert!(tls.server_name == "broker.example.com".to_string());
-        assert2::assert!(tls.client_identity == Some((cert, key)));
-        assert2::assert!(tls.trust_roots_pem == Some(ca));
+        assert2::assert!(
+            tls.key_store
+                == Some(krabka_client_core::KeyStore::PemFiles {
+                    certificate_chain: cert,
+                    private_key: key,
+                    key_password: None,
+                })
+        );
+        assert2::assert!(tls.trust_store == krabka_client_core::TrustStore::PemFile(ca));
     }
 
     #[test]

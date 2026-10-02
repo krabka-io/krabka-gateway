@@ -96,12 +96,13 @@ async fn send_stream_produces_all_records() {
     admin
         .create_topics(
             &[CreateTopicSpec {
+                replica_assignments: std::collections::BTreeMap::new(),
                 name: "ss-topic".into(),
                 partitions: 1,
                 replicas: 1,
                 configs: BTreeMap::new(),
             }],
-            krabka_units::secs(10),
+            krabka_client_admin::TopicMutationOptions::with_timeout(krabka_units::secs(10)),
         )
         .await
         .unwrap();
@@ -169,12 +170,13 @@ async fn subscribe_streams_cloudevent_headers_then_commits() {
     admin
         .create_topics(
             &[CreateTopicSpec {
+                replica_assignments: std::collections::BTreeMap::new(),
                 name: "sub-topic".into(),
                 partitions: 1,
                 replicas: 1,
                 configs: BTreeMap::new(),
             }],
-            krabka_units::secs(10),
+            krabka_client_admin::TopicMutationOptions::with_timeout(krabka_units::secs(10)),
         )
         .await
         .unwrap();
@@ -289,12 +291,13 @@ async fn subscribe_filters_raw_json_through_live_consume_session() {
     admin
         .create_topics(
             &[CreateTopicSpec {
+                replica_assignments: std::collections::BTreeMap::new(),
                 name: "filtered-live".into(),
                 partitions: 1,
                 replicas: 1,
                 configs: BTreeMap::new(),
             }],
-            krabka_units::secs(10),
+            krabka_client_admin::TopicMutationOptions::with_timeout(krabka_units::secs(10)),
         )
         .await
         .unwrap();
@@ -366,12 +369,13 @@ async fn streaming_wrappers_and_router_build() {
     admin
         .create_topics(
             &[CreateTopicSpec {
+                replica_assignments: std::collections::BTreeMap::new(),
                 name: "wrap-topic".into(),
                 partitions: 1,
                 replicas: 1,
                 configs: BTreeMap::new(),
             }],
-            krabka_units::secs(10),
+            krabka_client_admin::TopicMutationOptions::with_timeout(krabka_units::secs(10)),
         )
         .await
         .unwrap();

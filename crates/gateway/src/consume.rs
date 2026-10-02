@@ -291,7 +291,19 @@ impl ConsumeSession {
         if offsets.is_empty() {
             return Ok(());
         }
-        consumer.commit_offsets_sync(offsets.clone()).await?;
+        consumer
+            .commit_offsets_sync(
+                offsets
+                    .iter()
+                    .map(|(key, offset)| {
+                        (
+                            key.clone(),
+                            krabka_client_consumer::OffsetAndMetadata::new(*offset),
+                        )
+                    })
+                    .collect(),
+            )
+            .await?;
         for (key, next_offset) in offsets {
             if let Some(state) = self.ack_tracker.get_mut(&key) {
                 state.last_committed_frontier = next_offset.checked_sub(1);

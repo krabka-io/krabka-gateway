@@ -78,12 +78,13 @@ async fn create_topic(bootstrap: &str, name: &str, partitions: i32) {
     admin
         .create_topics(
             &[CreateTopicSpec {
+                replica_assignments: std::collections::BTreeMap::new(),
                 name: name.into(),
                 partitions,
                 replicas: 1,
                 configs: BTreeMap::new(),
             }],
-            krabka_units::secs(10),
+            krabka_client_admin::TopicMutationOptions::with_timeout(krabka_units::secs(10)),
         )
         .await
         .unwrap();
@@ -232,7 +233,7 @@ async fn produce_value(producer: &Producer, topic: &str, value: &[u8]) {
         headers: vec![],
         timestamp_ms: None,
     };
-    producer.send(rec).await.await.unwrap().unwrap();
+    producer.send(rec).await.unwrap();
 }
 
 /// Decoded DLQ record: the value plus the `x-krabka-dlq-source` header. The
