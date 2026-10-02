@@ -382,6 +382,7 @@ impl LiveSubstrate {
             Broker::start_with_controller_listener(broker_config, Some(controller_listener))
                 .await
                 .map_err(HarnessError::BrokerStart)?;
+        broker.wait_until_group_coordinator_ready().await;
         let bootstrap = broker.listen_addr().to_string();
         create_topics(&bootstrap, topic_names).await?;
         set_share_groups_earliest(&bootstrap, queue_groups).await?;
