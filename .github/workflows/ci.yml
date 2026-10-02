@@ -50,17 +50,17 @@ jobs:
       # and to `info` elsewhere, so this step gates here and only reports
       # locally.
       - name: format
-        run: aspect format
+        run: aspect format --bazel-flag=--remote_cache= --bazel-flag=--bes_backend=
       # `aspect lint` reads the `rules_lint_machine` output group. The clippy
       # aspect from aspect_rules_lint_rust writes it (see
       # //tools/lint/linters.bzl). `bazel test //...` gates on the same aspect
       # through the `*_clippy` targets.
       - name: lint
-        run: aspect lint --aspect=//tools/lint:linters.bzl%clippy
+        run: aspect lint --bazel-flag=--remote_cache= --bazel-flag=--bes_backend= --aspect=//tools/lint:linters.bzl%clippy
       - name: build
-        run: aspect build //...
+        run: aspect build --bazel-flag=--remote_cache= --bazel-flag=--bes_backend= //...
       - name: test
-        run: aspect test //...
+        run: aspect test --bazel-flag=--remote_cache= --bazel-flag=--bes_backend= //...
 
   # LCOV over the first-party crates. A separate job, because instrumented
   # binaries are a different build and would only evict the `ci` job's cache.
