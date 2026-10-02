@@ -87,7 +87,7 @@ final class LiveGatewayTransport {
                 .setGroupId(group)
                 .addTopics(topic)
                 .setMaxMessages(max)
-                .setWaitMs(0)
+                .setWaitMs(1_000)
                 .setSessionId(sessionId)
                 .setLockDurationMs(lockDurationMs)
                 .build();

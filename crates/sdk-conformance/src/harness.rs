@@ -367,6 +367,11 @@ impl LiveSubstrate {
         let data_dir = tempfile::TempDir::new()?;
         let mut broker_config = BrokerConfig::for_tests(data_dir.path().to_path_buf());
         broker_config.classic_group_initial_rebalance_delay = millis(1);
+        // Each SDK gives an acquisition one second. A partition initialized
+        // after the join must become assigned on a heartbeat within that budget.
+        broker_config.share_group.heartbeat_interval = Duration::from_millis(100);
+        broker_config.share_group.min_heartbeat_interval = Duration::from_millis(100);
+        broker_config.share_group.max_heartbeat_interval = Duration::from_millis(200);
         // `for_tests` names the controller as `127.0.0.1:0`. The broker binds
         // an ephemeral port for it, but its heartbeat client dials the address
         // in `controller_quorum_voters`, which still says port 0. No heartbeat

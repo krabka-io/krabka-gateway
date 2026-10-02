@@ -86,7 +86,7 @@ func (q *Queues) AcquireWithSession(ctx context.Context, topic string, group str
 	if q.client.mockStore != nil {
 		return q.client.mockStore.acquireQueueMessages(topic, group, max, sessionID)
 	}
-	request := connect.NewRequest(&gw.QueueAcquireRequest{GroupId: group, Topics: []string{topic}, MaxMessages: max, WaitMs: 0, SessionId: sessionID, LockDurationMs: uint64(defaultQueueLockDurationMS)})
+	request := connect.NewRequest(&gw.QueueAcquireRequest{GroupId: group, Topics: []string{topic}, MaxMessages: max, WaitMs: 1_000, SessionId: sessionID, LockDurationMs: uint64(defaultQueueLockDurationMS)})
 	addAuthorization(request.Header(), q.client.bearerToken)
 	response, err := q.client.gateway.QueueAcquire(ctx, request)
 	if err != nil {
