@@ -251,13 +251,19 @@ struct DlqRecord {
 /// direct `Fetch` is enough.
 async fn fetch_dlq(client: &Client, topic: &str) -> Vec<DlqRecord> {
     // Resolve the topic_id (Fetch v13 keys partitions by topic_id).
-    let md = client.send(MetadataRequest::default()).await.unwrap();
+    let md = client
+        .send(MetadataRequest {
+            topics: None,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
     let topic_id = md
         .topics
         .iter()
         .find(|t| t.name.as_deref() == Some(topic))
         .map(|t| t.topic_id)
-        .unwrap_or_default();
+        .expect("DLQ topic must be present in metadata");
 
     let resp = client
         .send(FetchRequest {
@@ -279,6 +285,7 @@ async fn fetch_dlq(client: &Client, topic: &str) -> Vec<DlqRecord> {
         })
         .await
         .unwrap();
+    assert2::assert!(resp.error_code == 0, "DLQ Fetch request must succeed");
 
     let mut out = Vec::new();
     for t in &resp.responses {
@@ -286,6 +293,7 @@ async fn fetch_dlq(client: &Client, topic: &str) -> Vec<DlqRecord> {
             if p.partition_index != 0 {
                 continue;
             }
+            assert2::assert!(p.error_code == 0, "DLQ partition Fetch must succeed");
             let Some(payload) = &p.records else { continue };
             let Some(batches) = payload.as_v2() else {
                 continue;
