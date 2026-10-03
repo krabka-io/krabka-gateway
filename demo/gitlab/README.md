@@ -1,8 +1,9 @@
-# GitLab.com merge request producer
+# GitLab.com merge request ingestion
 
 This setup sends signed GitLab.com merge request deliveries through gateway
-replicas into `gitlab.merge-requests`. The consumer belongs to the application
-team; this example adds no consumer service.
+replicas into `gitlab.merge-requests`. The application team owns its production
+consumer. [consumer-go](consumer-go) provides a runnable Go example using
+[krabka-streams-go](https://github.com/krabka-io/krabka-streams-go).
 
 ## Configure the hook
 
@@ -130,6 +131,34 @@ hooks; GitLab can disable a repeatedly failing hook. Current-state reconciliatio
 cannot reconstruct every missed transition.
 [Failure behavior](https://docs.gitlab.com/user/project/integrations/webhooks/#auto-disabled-webhooks).
 
+## Go consumer example
+
+The example consumes directly from the broker with an ordinary consumer group,
+uses a `krabka-streams-go` columnar topology to decode merge request JSON, and
+writes a JSON summary with its delivery ID to stdout. It uses read-committed
+isolation and commits offsets only after the complete polled batch is processed
+and written successfully. Decode, output, and commit failures stop the process;
+SIGINT/SIGTERM cancel polling and close the consumer.
+
+With Go 1.26.5 or newer, run from this directory:
+
+```sh
+cd consumer-go
+go run . -brokers 127.0.0.1:9092 \
+  -topic gitlab.merge-requests -group gitlab-mr-example
+```
+
+Instances with the same group share partitions; use a different group for a
+separate application that needs every event. The dependency is pinned to a
+specific upstream revision in `go.mod` and `go.sum`.
+
+Stdout is an example output, and delivery is at least once: a crash or uncertain
+offset commit can repeat already printed summaries. Replace output with a
+durable, duplicate-safe application effect before using this as a service.
+The example intentionally stops on an invalid record rather than silently
+skipping it; the application team owns retries, dead-letter handling, broker
+TLS/authentication, and reconciliation.
+
 ## Local verification
 
 From the repository root:
@@ -137,6 +166,9 @@ From the repository root:
 ```sh
 cargo test -p krabka-gateway --no-default-features --features vendored-protoc \
   --test webhook standard_webhooks_producer_path
+cd demo/gitlab/consumer-go
+go test ./...
+go vet ./...
 ```
 
 This integration test runs against an in-process broker. It checks signed
