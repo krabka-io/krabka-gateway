@@ -1,6 +1,6 @@
 plugins {
     `java-library`
-    kotlin("jvm") version "2.4.10"
+    kotlin("jvm") version "2.4.20"
     application
 }
 
@@ -8,8 +8,8 @@ repositories { mavenCentral() }
 
 dependencies {
     implementation("com.connectrpc:connect-kotlin:0.9.0")
-    implementation("com.fasterxml.jackson.core:jackson-databind:2.22.2")
-    implementation("com.google.protobuf:protobuf-java:4.36.0")
+    implementation("com.fasterxml.jackson.core:jackson-databind:2.22.3")
+    implementation("com.google.protobuf:protobuf-java:4.36.2")
     implementation("com.squareup.okhttp3:okhttp:5.5.0")
 
     testImplementation("com.squareup.okhttp3:mockwebserver3:5.5.0")

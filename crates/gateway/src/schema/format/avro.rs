@@ -4,10 +4,10 @@
 //! `wire.rs` adds that framing separately. The gateway's structured input and
 //! output are JSON.
 //!
-//! This module uses [`apache_avro`] 0.21 to parse a schema, to encode binary,
+//! This module uses [`apache_avro`] 0.22 to parse a schema, to encode binary,
 //! and to round-trip a value.
 
-use apache_avro::Schema;
+use apache_avro::{Schema, reader::datum::GenericDatumReader, writer::datum::GenericDatumWriter};
 use bytes::Bytes;
 
 use crate::codec::CodecError;
@@ -17,10 +17,10 @@ use crate::codec::CodecError;
 /// Steps:
 /// 1. Parse the Avro schema string.
 /// 2. Parse the JSON bytes into a [`serde_json::Value`].
-/// 3. Convert to [`apache_avro::types::Value`] with `apache_avro::to_value`,
+/// 3. Convert to [`apache_avro::types::Value`] with `TryFrom`,
 ///    then call `Value::resolve` to coerce ints, enums, and unions to the
 ///    schema.
-/// 4. Encode as an Avro binary datum with `apache_avro::to_avro_datum`.
+/// 4. Encode as an Avro binary datum with [`GenericDatumWriter`].
 /// # Errors
 /// Returns an error when configuration is invalid, protocol encoding fails, the broker rejects the request, or transport I/O fails.
 pub fn serialize(schema: &str, json: &[u8]) -> Result<Bytes, CodecError> {
@@ -30,16 +30,17 @@ pub fn serialize(schema: &str, json: &[u8]) -> Result<Bytes, CodecError> {
     let json_value: serde_json::Value = serde_json::from_slice(json)
         .map_err(|e| CodecError::Serialize(format!("JSON parse: {e}")))?;
 
-    // `apache_avro::to_value` converts a serde-serializable value into an
-    // `apache_avro::types::Value`; then `resolve` coerces it against the schema
-    // (e.g. JSON numbers become `Value::Long` for an Avro `long` field).
-    let avro_value = apache_avro::to_value(json_value)
-        .map_err(|e| CodecError::Serialize(format!("to_value: {e}")))?
+    // Convert JSON numbers to Avro ints/longs before resolving the schema.
+    // The generic serde serializer encodes unsigned integers as fixed bytes.
+    let avro_value = apache_avro::types::Value::try_from(json_value)
+        .map_err(|e| CodecError::Serialize(format!("JSON to Avro: {e}")))?
         .resolve(&avro_schema)
         .map_err(|e| CodecError::Serialize(format!("resolve: {e}")))?;
 
-    let datum = apache_avro::to_avro_datum(&avro_schema, avro_value)
-        .map_err(|e| CodecError::Serialize(format!("to_avro_datum: {e}")))?;
+    let datum = GenericDatumWriter::builder(&avro_schema)
+        .build()
+        .and_then(|writer| writer.write_value_to_vec(avro_value))
+        .map_err(|e| CodecError::Serialize(format!("Avro encode: {e}")))?;
 
     Ok(Bytes::from(datum))
 }
@@ -49,9 +50,9 @@ pub fn serialize(schema: &str, json: &[u8]) -> Result<Bytes, CodecError> {
 /// Steps:
 /// 1. Parse the Avro schema string.
 /// 2. Decode the binary datum into an [`apache_avro::types::Value`] with
-///    `apache_avro::from_avro_datum`.
+///    [`GenericDatumReader`].
 /// 3. Convert to [`serde_json::Value`] with the `TryFrom` that
-///    `apache_avro` 0.21 supplies.
+///    `apache_avro` 0.22 supplies.
 /// 4. Serialize to JSON bytes.
 /// # Errors
 /// Returns an error when configuration is invalid, protocol encoding fails, the broker rejects the request, or transport I/O fails.
@@ -60,10 +61,12 @@ pub fn deserialize(schema: &str, payload: &[u8]) -> Result<Bytes, CodecError> {
         .map_err(|e| CodecError::Serialize(format!("Avro schema parse: {e}")))?;
 
     let mut cursor = std::io::Cursor::new(payload);
-    let avro_value = apache_avro::from_avro_datum(&avro_schema, &mut cursor, None)
-        .map_err(|e| CodecError::Serialize(format!("from_avro_datum: {e}")))?;
+    let avro_value = GenericDatumReader::builder(&avro_schema)
+        .build()
+        .and_then(|reader| reader.read_value(&mut cursor))
+        .map_err(|e| CodecError::Serialize(format!("Avro decode: {e}")))?;
 
-    // `TryFrom<Value> for serde_json::Value` is implemented in apache-avro 0.21.
+    // `TryFrom<Value> for serde_json::Value` is implemented in apache-avro 0.22.
     let json_value = serde_json::Value::try_from(avro_value)
         .map_err(|e| CodecError::Serialize(format!("avro→json conversion: {e}")))?;
 
@@ -116,6 +119,21 @@ mod tests {
     fn validation_cases() {
         for (name, json, valid) in [
             ("valid", br#"{"id": 42, "name": "hello"}"#.as_slice(), true),
+            (
+                "long_min",
+                br#"{"id": -9223372036854775808, "name": "a"}"#.as_slice(),
+                true,
+            ),
+            (
+                "long_max",
+                br#"{"id": 9223372036854775807, "name": "a"}"#.as_slice(),
+                true,
+            ),
+            (
+                "long_overflow",
+                br#"{"id": 9223372036854775808, "name": "a"}"#.as_slice(),
+                false,
+            ),
             (
                 "wrong_type",
                 br#"{"id": "notlong", "name": "a"}"#.as_slice(),

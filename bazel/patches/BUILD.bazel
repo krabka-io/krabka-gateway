@@ -1,3 +1,2 @@
-# Patches applied to third-party modules by `single_version_override` and
-# `crate.annotation` (see //MODULE.bazel).
+# Patches applied to third-party crates by `crate.annotation` (see //MODULE.bazel).
 exports_files(glob(["*.patch"]))

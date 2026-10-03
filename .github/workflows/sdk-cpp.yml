@@ -15,7 +15,7 @@ concurrency:
 
 jobs:
   build-test-conformance:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 45
     strategy:
       fail-fast: false
@@ -41,19 +41,19 @@ jobs:
           pkg-config --modversion libnghttp2
       - uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: '1.97.1'
+          toolchain: '1.99.0'
       - uses: Swatinem/rust-cache@v2
         with:
           key: sdk-cpp
       - uses: actions/setup-go@v7.0.0
         with:
-          go-version: '1.27.x'
+          go-version: '1.27.1'
       - name: Generate SDK stubs
         run: |
-          go run github.com/bufbuild/buf/cmd/buf@v1.54.0 generate
+          go run github.com/bufbuild/buf/cmd/buf@v1.73.0 generate
           git diff --exit-code -- buf.gen.yaml sdks/cpp/gen
       - name: Build with CMake (${{ matrix.sanitizer }})
-        run: cmake -S sdks/cpp -B ${{ matrix.build-dir }} ${{ matrix.cmake-args }} && cmake --build ${{ matrix.build-dir }} --parallel
+        run: cmake -S sdks/cpp -B ${{ matrix.build-dir }} -DKRABKA_CPP_REQUIRE_EXTERNAL_DEPS=ON ${{ matrix.cmake-args }} && cmake --build ${{ matrix.build-dir }} --parallel
       - name: Run CTest (${{ matrix.sanitizer }})
         run: ctest --test-dir ${{ matrix.build-dir }} ${{ matrix.ctest-args }}
       - name: Run conformance

@@ -23,10 +23,10 @@ endif()
 
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(NGHTTP2 IMPORTED_TARGET libnghttp2)
-find_package(Protobuf QUIET)
+find_package(Protobuf 3.21.12 EXACT QUIET)
 
 if(KRABKA_CPP_REQUIRE_EXTERNAL_DEPS AND (NOT NGHTTP2_FOUND OR NOT Protobuf_FOUND))
-  message(FATAL_ERROR "full C++ SDK gate requires libnghttp2 and protobuf development packages")
+  message(FATAL_ERROR "full C++ SDK gate requires libnghttp2 and protobuf 3.21.12 development packages")
 endif()
 
 add_library(krabka_cpp
@@ -45,8 +45,12 @@ if(NGHTTP2_FOUND)
 else()
   message(WARNING "libnghttp2 not found; live transport will return Transport errors")
 endif()
-if(NOT Protobuf_FOUND)
-  message(WARNING "protobuf not found; generated gateway bindings are not part of this local gate")
+if(Protobuf_FOUND)
+  target_sources(krabka_cpp PRIVATE gen/krabka/gateway/v1/gateway.pb.cc)
+  target_include_directories(krabka_cpp PUBLIC gen)
+  target_link_libraries(krabka_cpp PUBLIC protobuf::libprotobuf)
+else()
+  message(WARNING "protobuf 3.21.12 not found; generated gateway bindings are not part of this local gate")
 endif()
 target_compile_options(krabka_cpp PRIVATE -Wall -Wextra -Wpedantic)
 
