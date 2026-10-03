@@ -4,14 +4,19 @@
 //! tracks the assigned dedup partitions, and keeps the claim map warm. P3 gates
 //! every produce on ownership and warmth, so only the owning replica can write.
 
-use std::sync::{
-    Arc, OnceLock,
-    atomic::{AtomicBool, Ordering},
+use std::{
+    collections::{HashMap, HashSet},
+    sync::{
+        Arc, OnceLock, RwLock, Weak,
+        atomic::{AtomicBool, AtomicU32, Ordering},
+    },
 };
 
 use bytes::Bytes;
 use dashmap::DashMap;
-use krabka_client_consumer::{AutoOffsetReset, Consumer, IsolationLevel};
+use krabka_client_consumer::{
+    AutoOffsetReset, Consumer, ConsumerRebalanceListener, IsolationLevel, RebalanceListenerError,
+};
 use krabka_client_producer::{Acks, Producer, ProducerRecord};
 use krabka_units::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -34,18 +39,24 @@ pub struct DedupStore {
     map: DashMap<String, ClaimValue>,
     partitions: u32,
     /// Dedup-partition ids this replica owns, from the consumer-group assignment.
-    owned: std::sync::RwLock<std::collections::HashSet<u32>>,
+    owned: RwLock<HashSet<u32>>,
     /// Caught up on reads of the owned partitions since the last assignment
     /// change.
     warm: AtomicBool,
-    /// Has been warm at least once. This drives /readyz.
+    /// Has completed replay at least once, for startup waits.
     warmed_once: AtomicBool,
+    /// An uncertain transaction requires a new process to fence and replay.
+    restart_required: AtomicBool,
     /// Optional membership publisher. The binary sets it before `run_ownership`
     /// starts. In a single-owner or unit context it is `None`, and the store
     /// publishes nothing.
     membership: OnceLock<Arc<crate::dedup::membership::MembershipPublisher>>,
+    /// The producer barrier fences prior owners before capturing replay ends.
+    /// Weak ownership avoids a cycle with the engine's store reference.
+    engine: OnceLock<Weak<crate::dedup::DedupEngine>>,
     poll_timeout: Time,
     warmup_empty_polls: u32,
+    empty_polls: AtomicU32,
 }
 
 impl DedupStore {
@@ -61,12 +72,15 @@ impl DedupStore {
         Self {
             map: DashMap::new(),
             partitions,
-            owned: std::sync::RwLock::new(std::collections::HashSet::new()),
+            owned: RwLock::new(HashSet::new()),
             warm: AtomicBool::new(false),
             warmed_once: AtomicBool::new(false),
+            restart_required: AtomicBool::new(false),
             membership: OnceLock::new(),
+            engine: OnceLock::new(),
             poll_timeout: runtime.consumer_poll_timeout,
             warmup_empty_polls: runtime.ownership_warmup_empty_polls,
+            empty_polls: AtomicU32::new(0),
         }
     }
 
@@ -74,6 +88,13 @@ impl DedupStore {
     /// `run_ownership`, so the store publishes the first assignment.
     pub fn set_membership(&self, publisher: Arc<crate::dedup::membership::MembershipPublisher>) {
         let _ = self.membership.set(publisher);
+    }
+
+    /// Register the transactional engine before starting ownership recovery.
+    /// # Panics
+    /// Panics if an engine was already registered for this store.
+    pub fn set_engine(&self, engine: &Arc<crate::dedup::DedupEngine>) {
+        assert2::assert!(self.engine.set(Arc::downgrade(engine)).is_ok());
     }
 
     /// True if this replica currently owns dedup-partition `p`.
@@ -88,10 +109,17 @@ impl DedupStore {
     /// assignment change.
     #[must_use]
     pub fn is_warm(&self) -> bool {
-        self.warm.load(Ordering::SeqCst)
+        self.warm.load(Ordering::SeqCst) && !self.restart_required.load(Ordering::SeqCst)
     }
 
-    /// Has warmed at least once. The readiness probe reads this.
+    /// Fence requests before an errored producer is dropped. The ownership task
+    /// then exits, letting its supervisor stop the replica for fresh recovery.
+    pub(crate) fn require_restart(&self) {
+        self.restart_required.store(true, Ordering::SeqCst);
+        self.warm.store(false, Ordering::SeqCst);
+    }
+
+    /// Has completed replay at least once. Readiness uses `is_warm` instead.
     #[must_use]
     pub fn has_warmed_once(&self) -> bool {
         self.warmed_once.load(Ordering::SeqCst)
@@ -157,6 +185,7 @@ impl DedupStore {
         ),
     ) -> Result<(), GatewayError> {
         let (security, policy) = client_policy;
+        let replay_targets = Arc::new(RwLock::new(HashMap::new()));
         let mut consumer = Consumer::builder()
             .bootstrap(bootstrap)
             .client_id(client_id)
@@ -166,88 +195,100 @@ impl DedupStore {
             .subscribe(vec![dedup_topic.clone()])
             .isolation_level(IsolationLevel::ReadCommitted)
             .auto_offset_reset(AutoOffsetReset::Earliest)
+            .enable_auto_commit(false)
+            .rebalance_listener(Box::new(OwnershipReplay {
+                store: Arc::clone(&self),
+                replay_targets: Arc::clone(&replay_targets),
+                topic: dedup_topic,
+            }))
             .assignors(vec![krabka_client_consumer::Assignor::CooperativeSticky])
             .maybe_security(security)
             .build()
             .await?;
 
-        let mut current: std::collections::HashSet<u32> = std::collections::HashSet::new();
-        let mut empty_polls = 0u32;
-        let mut poll_err: Option<GatewayError> = None;
-
-        loop {
-            let batch = tokio::select! {
-                () = shutdown.cancelled() => break,
-                b = consumer.poll(self.poll_timeout) => match b {
-                    Ok(batch) => batch,
-                    Err(e) => { poll_err = Some(e.into()); break; }
-                },
-            };
-
-            let assigned: std::collections::HashSet<u32> = consumer
-                .assignment()
-                .await
-                .into_iter()
-                .filter(|(t, _)| *t == dedup_topic)
-                .filter_map(|(_, p)| u32::try_from(p).ok())
-                .collect();
-            if assigned != current {
-                let revoked: std::collections::HashSet<u32> =
-                    current.difference(&assigned).copied().collect();
-                if !revoked.is_empty() {
-                    self.map.retain(|k, _| {
-                        !revoked.contains(&crate::dedup::partition_for(k, self.partitions))
-                    });
+        let result = async {
+            loop {
+                let batch = tokio::select! {
+                    () = shutdown.cancelled() => break,
+                    batch = consumer.poll(self.poll_timeout) => batch?,
+                };
+                if self.restart_required.load(Ordering::SeqCst) {
+                    return Err(GatewayError::Unavailable);
                 }
-                current.clone_from(&assigned);
-                *self.owned.write().expect("owned lock") = assigned;
-                self.warm.store(false, Ordering::SeqCst);
-                empty_polls = 0;
-                crate::metrics::metrics()
-                    .set_owned_partitions(i64::try_from(current.len()).expect("count fits i64"));
-                if let Some(publisher) = self.membership.get()
-                    && let Err(e) = publisher.publish(&current).await
-                {
-                    tracing::warn!(error = %e, "membership publish failed");
-                }
-            }
-
-            // Warm heuristic: the configured empty-poll count since the last
-            // assignment change ⇒ owned partitions drained to the tail, safe to
-            // serve. Assumes a low-traffic, bursty claim topic (it is: tiny
-            // compacted claims that replay then idle); a continuously-saturated
-            // owned partition would defer warmth until it next idles. A future
-            // HWM-precise gate (spec §2) removes that theoretical caveat.
-            if batch.is_empty() {
-                empty_polls = empty_polls.saturating_add(1);
-                if ownership_is_warm(empty_polls, self.warmup_empty_polls) {
-                    self.warm.store(true, Ordering::SeqCst);
-                    self.warmed_once.store(true, Ordering::SeqCst);
-                }
-                continue;
-            }
-            empty_polls = 0;
-            for r in batch {
-                let Some(key_bytes) = r.key else { continue };
-                let key = String::from_utf8_lossy(&key_bytes).into_owned();
-                match r.value {
-                    None => {
-                        self.map.remove(&key);
+                let empty_polls = if batch.is_empty() {
+                    self.empty_polls.load(Ordering::SeqCst).saturating_add(1)
+                } else {
+                    0
+                };
+                self.empty_polls.store(empty_polls, Ordering::SeqCst);
+                for record in batch {
+                    if !u32::try_from(record.partition).is_ok_and(|p| self.owns(p)) {
+                        continue;
                     }
-                    // A malformed claim must not kill the ownership loop; skip it.
-                    Some(v) => {
-                        if let Ok(claim) = serde_json::from_slice::<ClaimValue>(&v) {
-                            self.map.insert(key, claim);
+                    let Some(key_bytes) = record.key else {
+                        continue;
+                    };
+                    let key = String::from_utf8_lossy(&key_bytes).into_owned();
+                    match record.value {
+                        None => {
+                            self.map.remove(&key);
+                        }
+                        // Skip malformed claims without killing the ownership loop.
+                        Some(value) => {
+                            if let Ok(claim) = serde_json::from_slice::<ClaimValue>(&value) {
+                                self.map.insert(key, claim);
+                            }
                         }
                     }
                 }
+                if !self.is_warm() && empty_polls >= self.warmup_empty_polls {
+                    let targets = replay_targets.read().expect("replay lock").clone();
+                    let mut positions = HashMap::new();
+                    for (topic, partition) in targets.keys() {
+                        positions.insert(
+                            (topic.clone(), *partition),
+                            consumer.position(topic.clone(), *partition).await?,
+                        );
+                    }
+                    if replay_complete(&targets, &positions) {
+                        self.warm.store(true, Ordering::SeqCst);
+                        self.warmed_once.store(true, Ordering::SeqCst);
+                    }
+                }
             }
+            Ok::<(), GatewayError>(())
         }
+        .await;
 
+        // A stopped or failed reader can no longer safely accept claims.
+        self.warm.store(false, Ordering::SeqCst);
+        self.owned.write().expect("owned lock").clear();
+        self.map.clear();
+        crate::metrics::metrics().set_owned_partitions(0);
         let _ = consumer.close().await;
-        match poll_err {
-            Some(e) => Err(e),
-            None => Ok(()),
+        result
+    }
+
+    async fn update_assignment(&self, assigned: HashSet<u32>) {
+        self.warm.store(false, Ordering::SeqCst);
+        self.empty_polls.store(0, Ordering::SeqCst);
+        let revoked = {
+            let mut owned = self.owned.write().expect("owned lock");
+            let revoked: HashSet<_> = owned.difference(&assigned).copied().collect();
+            owned.clone_from(&assigned);
+            revoked
+        };
+        if !revoked.is_empty() {
+            self.map.retain(|key, _| {
+                !revoked.contains(&crate::dedup::partition_for(key, self.partitions))
+            });
+        }
+        crate::metrics::metrics()
+            .set_owned_partitions(i64::try_from(assigned.len()).expect("count fits i64"));
+        if let Some(publisher) = self.membership.get()
+            && let Err(error) = publisher.publish(&assigned).await
+        {
+            tracing::warn!(%error, "membership publish failed");
         }
     }
 
@@ -292,20 +333,270 @@ impl DedupStore {
     }
 }
 
-#[must_use]
-fn ownership_is_warm(empty_polls: u32, warmup_empty_polls: u32) -> bool {
-    empty_polls >= warmup_empty_polls
+type ReplayOffsets = HashMap<(String, i32), i64>;
+
+/// Seek before returning the first record of a newly acquired partition, even
+/// when the group has an old committed offset or reacquires the same assignment.
+struct OwnershipReplay {
+    store: Arc<DedupStore>,
+    replay_targets: Arc<RwLock<ReplayOffsets>>,
+    topic: String,
+}
+
+#[async_trait::async_trait]
+impl ConsumerRebalanceListener for OwnershipReplay {
+    async fn on_partitions_revoked(
+        &mut self,
+        _consumer: &Consumer,
+        partitions: &[(String, i32)],
+    ) -> Result<(), RebalanceListenerError> {
+        self.store.warm.store(false, Ordering::SeqCst);
+        self.replay_targets.write().expect("replay lock").clear();
+        let mut owned = self.store.owned.read().expect("owned lock").clone();
+        for (_, partition) in partitions {
+            if let Ok(partition) = u32::try_from(*partition) {
+                owned.remove(&partition);
+            }
+        }
+        self.store.update_assignment(owned).await;
+        if let Some(engine) = self.store.engine.get() {
+            let engine = engine.upgrade().ok_or(GatewayError::Unavailable)?;
+            engine.release_partitions(partitions).await;
+        }
+        Ok(())
+    }
+
+    async fn on_partitions_assigned(
+        &mut self,
+        consumer: &Consumer,
+        partitions: &[(String, i32)],
+    ) -> Result<(), RebalanceListenerError> {
+        self.store.warm.store(false, Ordering::SeqCst);
+        if let Some(engine) = self.store.engine.get() {
+            let engine = engine.upgrade().ok_or(GatewayError::Unavailable)?;
+            // Fence old producers and settle their transactions before capturing
+            // the last stable offset: late commits must be included in replay.
+            engine.prepare_partitions(partitions).await?;
+        }
+        // An empty seek resets every partition, including retained partitions.
+        if !partitions.is_empty() {
+            consumer.seek_to_beginning(partitions).await?;
+        }
+        let assigned: Vec<_> = consumer
+            .assignment()
+            .await
+            .into_iter()
+            .filter(|(topic, _)| *topic == self.topic)
+            .collect();
+        let targets = consumer.end_offsets(&assigned).await?;
+        // Missing boundaries fail closed: an empty poll never proves replay.
+        if targets.len() != assigned.len() {
+            return Err(Box::new(GatewayError::Unavailable));
+        }
+        *self.replay_targets.write().expect("replay lock") = targets;
+        self.store
+            .update_assignment(
+                assigned
+                    .into_iter()
+                    .filter_map(|(_, partition)| u32::try_from(partition).ok())
+                    .collect(),
+            )
+            .await;
+        Ok(())
+    }
+}
+
+fn replay_complete(targets: &ReplayOffsets, positions: &ReplayOffsets) -> bool {
+    !targets.is_empty()
+        && targets.iter().all(|(partition, end)| {
+            positions
+                .get(partition)
+                .is_some_and(|position| position >= end)
+        })
 }
 
 #[cfg(test)]
 mod tests {
     use assert2::assert;
 
-    use super::ownership_is_warm;
+    use super::{ReplayOffsets, replay_complete};
 
     #[test]
-    fn ownership_warmup_uses_configured_empty_poll_threshold() {
-        assert!(!ownership_is_warm(2, 3));
-        assert!(ownership_is_warm(3, 3));
+    fn replay_requires_all_assigned_partition_boundaries() {
+        let targets = ReplayOffsets::from([(("claims".into(), 0), 0), (("claims".into(), 1), 9)]);
+        for (positions, expected) in [
+            (ReplayOffsets::new(), false),
+            (ReplayOffsets::from([(("claims".into(), 0), 0)]), false),
+            (
+                ReplayOffsets::from([(("claims".into(), 0), 0), (("claims".into(), 1), 8)]),
+                false,
+            ),
+            (
+                ReplayOffsets::from([(("claims".into(), 0), 0), (("claims".into(), 1), 9)]),
+                true,
+            ),
+            (
+                ReplayOffsets::from([(("claims".into(), 0), 0), (("claims".into(), 1), 10)]),
+                true,
+            ),
+        ] {
+            assert!(replay_complete(&targets, &positions) == expected);
+        }
+        assert!(!replay_complete(
+            &ReplayOffsets::new(),
+            &ReplayOffsets::new()
+        ));
+    }
+
+    #[test]
+    fn uncertain_transaction_requires_restart_despite_delayed_warmup() {
+        use std::sync::atomic::Ordering;
+
+        use super::DedupStore;
+
+        let store = DedupStore::new(1);
+        store.warm.store(true, Ordering::SeqCst);
+        assert!(store.is_warm());
+        store.require_restart();
+        assert!(!store.is_warm());
+        // A replay check that started before the error cannot reopen writes.
+        store.warm.store(true, Ordering::SeqCst);
+        assert!(!store.is_warm());
+    }
+
+    #[tokio::test]
+    async fn revocation_fences_writes_and_preserves_retained_claims() {
+        use std::{collections::HashSet, sync::atomic::Ordering};
+
+        use super::{ClaimValue, DedupStore};
+        use crate::ids::{Offset, PartitionIndex};
+
+        let store = DedupStore::new(2);
+        let key_for = |partition| {
+            (0..10_000)
+                .map(|n| format!("key-{n}"))
+                .find(|key| crate::dedup::partition_for(key, 2) == partition)
+                .unwrap()
+        };
+        let revoked = key_for(0);
+        let retained = key_for(1);
+        let value = ClaimValue {
+            topic: "events".into(),
+            partition: PartitionIndex(0),
+            offset: Offset(9),
+        };
+        store.update_assignment(HashSet::from([0, 1])).await;
+        store.apply(revoked.clone(), value.clone());
+        store.apply(retained.clone(), value.clone());
+        store.warm.store(true, Ordering::SeqCst);
+        store.update_assignment(HashSet::from([1])).await;
+        assert!(!store.is_warm());
+        assert!(!store.owns(0));
+        assert!(store.owns(1));
+        assert!(store.get(&revoked) == None);
+        assert!(store.get(&retained) == Some(value));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cold_owner_replays_claims_despite_previously_committed_group_offsets() {
+        use std::{sync::Arc, time::Duration};
+
+        use krabka_broker::{Broker, BrokerConfig};
+        use krabka_client_consumer::{AutoOffsetReset, Consumer};
+        use tokio_util::sync::CancellationToken;
+
+        use super::{ClaimValue, DedupStore};
+        use crate::{
+            dedup::topic::{InternalTopicPolicy, ensure_dedup_topic},
+            ids::{Offset, PartitionIndex},
+        };
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let broker = Broker::start(BrokerConfig::for_tests(dir.path().to_path_buf()))
+            .await
+            .unwrap();
+        let bootstrap = broker.listen_addr().to_string();
+        let topic = "cold-owner-claims";
+        let group = "cold-owner-group";
+        ensure_dedup_topic(
+            &bootstrap,
+            topic,
+            1,
+            krabka_units::hours(1),
+            &InternalTopicPolicy {
+                replication_factor: 1,
+                ..Default::default()
+            },
+            None,
+        )
+        .await
+        .unwrap();
+        let value = ClaimValue {
+            topic: "events".into(),
+            partition: PartitionIndex(0),
+            offset: Offset(9),
+        };
+        DedupStore::new(1)
+            .write_claim(
+                &bootstrap,
+                "claim-writer",
+                topic,
+                "delivery-1",
+                &value,
+                None,
+            )
+            .await
+            .unwrap();
+
+        let mut prior = Consumer::builder()
+            .bootstrap(bootstrap.clone())
+            .group_id(group)
+            .subscribe(vec![topic.into()])
+            .auto_offset_reset(AutoOffsetReset::Earliest)
+            .enable_auto_commit(false)
+            .build()
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(20), async {
+            loop {
+                if !prior
+                    .poll(krabka_units::millis(100))
+                    .await
+                    .unwrap()
+                    .is_empty()
+                {
+                    break;
+                }
+            }
+        })
+        .await
+        .unwrap();
+        prior.commit_sync().await.unwrap();
+        prior.close().await.unwrap();
+
+        let store = Arc::new(DedupStore::new(1));
+        let shutdown = CancellationToken::new();
+        let reader = tokio::spawn(Arc::clone(&store).run_ownership(
+            bootstrap,
+            "cold-owner".into(),
+            topic.into(),
+            group.into(),
+            shutdown.clone(),
+            None,
+        ));
+        tokio::time::timeout(Duration::from_secs(20), async {
+            while !store.is_warm() {
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(store.get("delivery-1") == Some(value));
+        assert!(store.owns(0));
+        shutdown.cancel();
+        reader.await.unwrap().unwrap();
+        assert!(!store.is_warm());
+        assert!(!store.owns(0));
+        broker.shutdown().await;
     }
 }

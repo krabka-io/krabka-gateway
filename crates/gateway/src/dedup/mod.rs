@@ -61,6 +61,49 @@ pub struct DedupEngine {
 }
 
 impl DedupEngine {
+    /// Fence the previous owner before the new owner captures replay boundaries.
+    pub(crate) async fn prepare_partitions(
+        &self,
+        partitions: &[(String, i32)],
+    ) -> Result<(), GatewayError> {
+        for (_, partition) in partitions {
+            let p = u32::try_from(*partition).map_err(|_| GatewayError::Unavailable)?;
+            let mut slot = self.slots[usize::try_from(p).expect("partition fits usize")]
+                .lock()
+                .await;
+            *slot = None;
+            *slot = Some(self.init_producer(p).await?);
+        }
+        Ok(())
+    }
+
+    /// Wait for in-flight writes and release revoked shard producers.
+    pub(crate) async fn release_partitions(&self, partitions: &[(String, i32)]) {
+        for (_, partition) in partitions {
+            if let Ok(p) = usize::try_from(*partition)
+                && let Some(slot) = self.slots.get(p)
+            {
+                *slot.lock().await = None;
+            }
+        }
+    }
+
+    async fn init_producer(&self, p: u32) -> Result<Producer, GatewayError> {
+        let producer = Producer::builder()
+            .bootstrap(self.bootstrap.clone())
+            .client_id(format!("{}-dedup-{}", self.client_id, p))
+            .dispatch_queue_capacity(self.dispatch_queue_capacity.get())
+            .frame_max(self.frame_max.size())
+            .enable_idempotence(true)
+            .acks(Acks::All)
+            .transactional_id(format!("{}-{}", self.txn_id_prefix, p))
+            .maybe_security(self.security.clone())
+            .build()
+            .await?;
+        producer.init_transactions().await?;
+        Ok(producer)
+    }
+
     /// Construct a dedup engine for a validated non-zero partition count.
     ///
     /// # Panics
@@ -171,6 +214,11 @@ impl DedupEngine {
             .lock()
             .await;
 
+        // A waiter may have acquired this lock after its shard was revoked.
+        if !self.store.owns(p) || !self.store.is_warm() {
+            return Err(GatewayError::Unavailable);
+        }
+
         // Re-check under the lock (another task may have just claimed it).
         if let Some(c) = self.store.get(key) {
             crate::metrics::metrics().record_dedup_hit();
@@ -181,16 +229,13 @@ impl DedupEngine {
             });
         }
 
-        // Run the transactional write. On ANY error, `txn_write` has already
-        // best-effort aborted any transaction it opened (only the guard it
-        // holds internally can do that — a flat `abort_transaction` call from
-        // out here can no longer reach it); just drop the producer so the
-        // next call re-initializes from `Ready`. Otherwise a single transient
-        // error would strand this partition's producer mid-transaction and
-        // brick every key that hashes to it until the process restarts.
+        // An error can hide a successful broker commit. Stop accepting writes
+        // before releasing this shard lock; a restarted replica fences the old
+        // producer and replays committed claims before handling retries.
         match self.txn_write(&mut slot, rec, value, key, p).await {
             Ok(outcome) => Ok(outcome),
             Err(e) => {
+                self.store.require_restart();
                 *slot = None;
                 Err(e)
             }
@@ -215,20 +260,7 @@ impl DedupEngine {
     ) -> Result<RecordOutcome, GatewayError> {
         // Lazily init the partition's transactional producer.
         if slot.is_none() {
-            let txn_id = format!("{}-{}", self.txn_id_prefix, p);
-            let producer = Producer::builder()
-                .bootstrap(self.bootstrap.clone())
-                .client_id(format!("{}-dedup-{}", self.client_id, p))
-                .dispatch_queue_capacity(self.dispatch_queue_capacity.get())
-                .frame_max(self.frame_max.size())
-                .enable_idempotence(true)
-                .acks(Acks::All)
-                .transactional_id(txn_id)
-                .maybe_security(self.security.clone())
-                .build()
-                .await?;
-            producer.init_transactions().await?;
-            *slot = Some(producer);
+            *slot = Some(self.init_producer(p).await?);
         }
         let producer = slot.as_ref().expect("just initialized");
 

@@ -45,7 +45,7 @@ use crate::{
     metrics::metrics,
     state::AppState,
     types::GatewayRecord,
-    webhook_config::{Source, extract_source, verify_signature},
+    webhook_config::{SignatureMode, Source, extract_source, verify_signature},
 };
 
 // ---------------------------------------------------------------------------
@@ -100,14 +100,34 @@ pub async fn webhook_handler(
         return StatusCode::NOT_FOUND.into_response();
     };
 
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(8);
     // 2. Collect with the endpoint's configured limit. Using the raw request
     // avoids Axum's fixed 2 MiB `Bytes` extractor cap overriding this policy.
     let (parts, body) = request.into_parts();
     let headers = parts.headers;
-    let Ok(body) = axum::body::to_bytes(body, cfg.max_body.bytes_usize()).await else {
+    let read_body = axum::body::to_bytes(body, cfg.max_body.bytes_usize());
+    let collected = if cfg.signature_mode == Some(SignatureMode::StandardWebhooks) {
+        match tokio::time::timeout_at(deadline, read_body).await {
+            Ok(body) => body,
+            Err(_) => return StatusCode::REQUEST_TIMEOUT.into_response(),
+        }
+    } else {
+        read_body.await
+    };
+    let Ok(body) = collected else {
         metrics().record_webhook_in("too_large");
         return StatusCode::PAYLOAD_TOO_LARGE.into_response();
     };
+
+    if cfg.signature_mode == Some(SignatureMode::StandardWebhooks) {
+        if crate::standard_webhooks::authenticate(cfg, &headers, &body, now_unix_secs()).is_none() {
+            metrics().record_webhook_in("unauthenticated");
+            return StatusCode::UNAUTHORIZED.into_response();
+        }
+        if !state.produce.has_dedup() {
+            return StatusCode::SERVICE_UNAVAILABLE.into_response();
+        }
+    }
 
     // 3. HMAC signature verification (when configured).
     if let Some(sig_header) = &cfg.signature_header {
@@ -181,17 +201,30 @@ pub async fn webhook_handler(
 
     // 6. Record key extraction (optional; None ⇒ producer partitioner chooses).
     let key: Option<String> = match &cfg.key_source {
-        Some(src) => extract_source(src, &headers, body_json.as_ref()),
+        Some(src) => match extract_source(src, &headers, body_json.as_ref()) {
+            Some(key) => Some(key),
+            None => return StatusCode::BAD_REQUEST.into_response(),
+        },
         None => None,
     };
 
     // 7. Translate CloudEvents after signature and source extraction, both of
     //    which deliberately operate on the original HTTP headers/body.
-    let translated = match translate_cloudevent_ingress(&headers, &body) {
-        Ok(translated) => translated,
-        Err(status) => {
-            metrics().record_webhook_in("bad_request");
-            return status.into_response();
+    // Standard Webhooks signs the payload but not Content-Type or ce-*.
+    // Those unsigned headers must not change encoding or bypass schema checks.
+    let translated = if cfg.signature_mode.is_some() {
+        TranslatedIngress {
+            headers: Vec::new(),
+            value: body,
+            is_cloud_event: false,
+        }
+    } else {
+        match translate_cloudevent_ingress(&headers, &body) {
+            Ok(translated) => translated,
+            Err(status) => {
+                metrics().record_webhook_in("bad_request");
+                return status.into_response();
+            }
         }
     };
     // CloudEvents are already protocol-bound bytes and must bypass Confluent
@@ -215,7 +248,34 @@ pub async fn webhook_handler(
         key: key.map(|k| Bytes::from(k.into_bytes())),
         value: translated.value,
         body_structured,
-        headers: translated.headers,
+        headers: {
+            let mut record_headers = translated.headers;
+            for name in &cfg.forward_headers {
+                for value in headers.get_all(name) {
+                    record_headers.push((
+                        name.to_string(),
+                        Some(Bytes::copy_from_slice(value.as_bytes())),
+                    ));
+                }
+            }
+            if cfg.signature_mode.is_some() {
+                for name in ["webhook-id", "webhook-timestamp"] {
+                    if !cfg
+                        .forward_headers
+                        .iter()
+                        .any(|forwarded| forwarded == name)
+                    {
+                        record_headers.push((
+                            name.to_string(),
+                            headers
+                                .get(name)
+                                .map(|value| Bytes::copy_from_slice(value.as_bytes())),
+                        ));
+                    }
+                }
+            }
+            record_headers
+        },
         partition: None,
         timestamp_ms: None,
         idempotency_key,
@@ -230,7 +290,20 @@ pub async fn webhook_handler(
 
     // 9. Produce and map the result to HTTP status.
     let host = peer.map_or_else(crate::handlers::unknown_host, |p| p.0);
-    produce_and_respond(state, rec, &principal, host).await
+    if cfg.signature_mode.is_some() {
+        // Complete the transaction after an HTTP timeout so a retry observes
+        // its claim instead of cancelling the producer mid-transaction.
+        let produce =
+            tokio::spawn(async move { produce_and_respond(state, rec, &principal, host).await });
+        if let Ok(Ok(response)) = tokio::time::timeout_at(deadline, produce).await {
+            response
+        } else {
+            metrics().record_webhook_in("error");
+            StatusCode::SERVICE_UNAVAILABLE.into_response()
+        }
+    } else {
+        produce_and_respond(state, rec, &principal, host).await
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -490,6 +563,7 @@ mod tests {
     fn signed_cfg(topic: &str) -> CompiledWebhook {
         CompiledWebhook {
             target_topic: topic.to_string(),
+            signature_mode: None,
             principal: format!("webhook:{topic}"),
             secret: Some(b"s3cr3t".to_vec()),
             signature_header: Some("X-Sig".to_string()),
@@ -499,6 +573,7 @@ mod tests {
             timestamp_tolerance: minutes(5),
             idempotency_source: None,
             key_source: None,
+            forward_headers: Vec::new(),
             max_body: mebibytes(1),
             schema_subject: None,
             schema_format: SchemaFormat::Json,
@@ -509,6 +584,7 @@ mod tests {
     fn unsigned_cfg(topic: &str) -> CompiledWebhook {
         CompiledWebhook {
             target_topic: topic.to_string(),
+            signature_mode: None,
             principal: format!("webhook:{topic}"),
             secret: None,
             signature_header: None,
@@ -518,6 +594,7 @@ mod tests {
             timestamp_tolerance: minutes(5),
             idempotency_source: None,
             key_source: None,
+            forward_headers: Vec::new(),
             max_body: bytes(64),
             schema_subject: None,
             schema_format: SchemaFormat::Json,

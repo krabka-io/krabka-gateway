@@ -139,6 +139,13 @@ The `KafkaGrpcGateway` custom resource that runs this server on Kubernetes lives
 in [`krabka-operator`](https://github.com/krabka-io/krabka-operator), with the
 other nine Krabka CRDs.
 
+## GitLab.com merge request ingestion
+
+[`demo/gitlab`](demo/gitlab) configures Standard Webhooks authentication,
+delivery deduplication, and raw merge request publishing across gateway replicas.
+It includes the record contract for the consumer team. GitLab payload handling
+and API reconciliation belong to the integration application.
+
 ## License
 
 Apache-2.0. Derivative work of [Apache Kafka](https://kafka.apache.org); see
