@@ -33,7 +33,7 @@ Arrow record batches the subscription filter reads.
 | SDK | Path | Toolchain |
 | --- | --- | --- |
 | C++ | [`sdks/cpp`](sdks/cpp) | CMake, nghttp2, protobuf 3.21.12 (Ubuntu 24.04) |
-| Go | [`sdks/go`](sdks/go) | Go 1.27+, Connect |
+| Go | [`sdks/go`](sdks/go) | Go 1.27.1+, Connect |
 | Java | [`sdks/java`](sdks/java) | Gradle, Kotlin, connect-kotlin |
 | TypeScript | [`sdks/ts`](sdks/ts) | Node.js 24+, npm, `@bufbuild/protobuf` |
 
