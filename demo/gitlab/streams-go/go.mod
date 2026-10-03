@@ -4,7 +4,7 @@ go 1.27.1
 
 require (
 	github.com/apache/arrow-go/v18 v18.7.0
-	github.com/krabka-io/krabka-streams-go v0.1.1-0.20261003040710-8baba1c1a19b
+	github.com/krabka-io/krabka-streams-go v0.2.0
 	github.com/twmb/franz-go v1.21.6
 	gitlab.com/gitlab-org/api/client-go v1.46.0
 )
