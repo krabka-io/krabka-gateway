@@ -20,12 +20,14 @@ use axum::{
     body::Body,
     http::{Request, StatusCode},
 };
+use base64::{Engine, engine::general_purpose::STANDARD};
 use bytes::Bytes;
 use hmac::{Hmac, KeyInit, Mac};
 use krabka_authz::{AuthorizationRequest, AuthorizationResult, SimpleAclAuthorizer};
 use krabka_broker::{Broker, BrokerConfig, BrokerHandle};
 use krabka_client_admin::{AdminClient, CreateTopicSpec};
 use krabka_client_consumer::{AutoOffsetReset, Consumer, IsolationLevel};
+use krabka_client_core::Client;
 use krabka_gateway::{
     authz::GatewayAuthz,
     codec::RawCodec,
@@ -37,6 +39,10 @@ use krabka_gateway::{
     webhook_config::WebhooksFile,
 };
 use krabka_metadata::{AclOperation, ResourceType};
+use krabka_protocol::owned::{
+    fetch_request::{FetchPartition, FetchRequest, FetchTopic},
+    metadata_request::MetadataRequest,
+};
 use krabka_security::{AuthMethod, Principal};
 use krabka_units::prelude::*;
 use sha2::Sha256;
@@ -58,9 +64,12 @@ const OWNERS_GROUP: &str = "__krabka_wh_dedup_owners";
 
 async fn boot() -> (BrokerHandle, String, TempDir) {
     let dir = TempDir::new().unwrap();
-    let broker = Broker::start(BrokerConfig::for_tests(dir.path().to_path_buf()))
-        .await
-        .unwrap();
+    let mut config = BrokerConfig::for_tests(dir.path().to_path_buf());
+    // These parallel fixtures need one coordinator partition, rather than the
+    // broker defaults of fifty open log partitions per internal topic.
+    config.offsets_topic_num_partitions = 1;
+    config.transaction_state_num_partitions = 1;
+    let broker = Broker::start(config).await.unwrap();
     let bootstrap = broker.listen_addr().to_string();
     (broker, bootstrap, dir)
 }
@@ -75,6 +84,8 @@ async fn boot() -> (BrokerHandle, String, TempDir) {
 async fn boot_with_acl_authorizer() -> (BrokerHandle, String, TempDir) {
     let dir = TempDir::new().unwrap();
     let mut config = BrokerConfig::for_tests(dir.path().to_path_buf());
+    config.offsets_topic_num_partitions = 1;
+    config.transaction_state_num_partitions = 1;
     config.authorizer = Arc::new(SimpleAclAuthorizer::new(
         std::iter::once("ANONYMOUS".to_owned()).collect(),
     ));
@@ -136,21 +147,6 @@ async fn webhook_state(
         .unwrap();
 
         let store = Arc::new(DedupStore::new(N));
-        {
-            let store = store.clone();
-            let bootstrap = bootstrap.to_string();
-            let token = token.clone();
-            let client_id = format!("{client_prefix}-owner");
-            tokio::spawn(store.run_ownership(
-                bootstrap,
-                client_id,
-                DEDUP_TOPIC.into(),
-                OWNERS_GROUP.into(),
-                token,
-                None,
-            ));
-        }
-
         let engine = Arc::new(DedupEngine::new(
             bootstrap,
             client_prefix,
@@ -160,6 +156,18 @@ async fn webhook_state(
             store.clone(),
             None,
         ));
+        store.set_engine(&engine);
+        let ownership = store.clone().run_ownership(
+            bootstrap.to_string(),
+            format!("{client_prefix}-owner"),
+            DEDUP_TOPIC.into(),
+            OWNERS_GROUP.into(),
+            token.clone(),
+            None,
+        );
+        tokio::spawn(async move {
+            ownership.await.expect("ownership replay failed");
+        });
 
         let core = ProduceCore::new(
             bootstrap,
@@ -275,6 +283,184 @@ async fn parse_response(resp: axum::response::Response) -> WR {
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
+
+/// Signed deliveries preserve raw JSON and metadata, and retries share one claim.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn standard_webhooks_producer_path() {
+    let (broker, bootstrap, _dir) = boot().await;
+    let topic = "wh-standard";
+    let mut admin = AdminClient::connect(std::slice::from_ref(&bootstrap))
+        .await
+        .unwrap();
+    admin
+        .create_topics(
+            &[CreateTopicSpec {
+                name: topic.into(),
+                partitions: 1,
+                replicas: 1,
+                replica_assignments: BTreeMap::new(),
+                configs: BTreeMap::new(),
+            }],
+            krabka_client_admin::TopicMutationOptions::with_timeout(secs(10)),
+        )
+        .await
+        .unwrap();
+    let config = format!(
+        r#"
+[[endpoints]]
+name = "merge-requests"
+target_topic = "{topic}"
+signature_mode = "standard_webhooks"
+secret = "whsec_c3RhbmRhcmRfd2ViaG9va3NfdGVzdF9zZWNyZXRfMzIh"
+key_source = "json:$.object_attributes.id"
+forward_headers = ["content-type", "x-gitlab-event"]
+"#
+    );
+    let (state, token, store) = webhook_state(&bootstrap, "standard", &config, true).await;
+    let store = store.unwrap();
+    wait_warm(&store).await;
+    let app = webhook_router(state);
+    let body = Bytes::from_static(
+        br#"{ "object_kind":"merge_request", "object_attributes":{"id":17,"iid":3} }"#,
+    );
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        .to_string();
+    let mut mac = <Hmac<Sha256>>::new_from_slice(b"standard_webhooks_test_secret_32!").unwrap();
+    mac.update(format!("delivery-42.{timestamp}.").as_bytes());
+    mac.update(&body);
+    let signature = format!("v1,{}", STANDARD.encode(mac.finalize().into_bytes()));
+    let request = |signature: &str| {
+        Request::post("/v1/webhooks/merge-requests")
+            .header("webhook-id", "delivery-42")
+            .header("webhook-timestamp", &timestamp)
+            .header("webhook-signature", signature)
+            .header("content-type", "application/json")
+            .header("x-gitlab-event", "Merge Request Hook")
+            .header("x-gitlab-token", "never-forward-this")
+            .header("ce-id", "unsigned-event")
+            .header("ce-source", "/unsigned")
+            .header("ce-type", "unsigned.type")
+            .header("ce-specversion", "1.0")
+            .body(Body::from(body.clone()))
+            .unwrap()
+    };
+    let forged = app.clone().oneshot(request("v1,invalid")).await.unwrap();
+    assert2::assert!(forged.status() == StatusCode::UNAUTHORIZED);
+    let mut outcomes = Vec::new();
+    for _ in 0..2 {
+        let response = app.clone().oneshot(request(&signature)).await.unwrap();
+        assert2::assert!(response.status() == StatusCode::OK);
+        outcomes.push(parse_response(response).await);
+    }
+    assert2::assert!(!outcomes[0].deduplicated && outcomes[1].deduplicated);
+    assert2::assert!(outcomes[0].offset == outcomes[1].offset);
+
+    // Replace the owner using the same ownership group and transactional IDs.
+    // The new replica must replay the committed claim before handling a retry.
+    token.cancel();
+    tokio::time::timeout(Duration::from_secs(20), async {
+        while store.is_warm() {
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .unwrap();
+    drop(app);
+    let (state, replacement_token, replacement_store) =
+        webhook_state(&bootstrap, "standard", &config, true).await;
+    wait_warm(&replacement_store.unwrap()).await;
+    let response = webhook_router(state)
+        .oneshot(request(&signature))
+        .await
+        .unwrap();
+    assert2::assert!(response.status() == StatusCode::OK);
+    let replaced = parse_response(response).await;
+    assert2::assert!(replaced.deduplicated && replaced.offset == outcomes[0].offset);
+    assert2::assert!(count_topic(&bootstrap, topic, "standard-verify").await == 1);
+
+    let client = Client::builder()
+        .bootstrap(bootstrap.clone())
+        .build()
+        .await
+        .unwrap();
+    let metadata = client
+        .send(MetadataRequest {
+            topics: None,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let topic_id = metadata
+        .topics
+        .iter()
+        .find(|t| t.name.as_deref() == Some(topic))
+        .unwrap()
+        .topic_id;
+    let fetched = client
+        .send(FetchRequest {
+            max_wait_ms: 500,
+            min_bytes: 1,
+            max_bytes: 1024 * 1024,
+            isolation_level: 1,
+            topics: vec![FetchTopic {
+                topic: topic.into(),
+                topic_id,
+                partitions: vec![FetchPartition {
+                    partition: 0,
+                    fetch_offset: 0,
+                    partition_max_bytes: 1024 * 1024,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert2::assert!(fetched.error_code == 0);
+    let partition = &fetched.responses[0].partitions[0];
+    assert2::assert!(partition.error_code == 0);
+    let records: Vec<_> = partition
+        .records
+        .as_ref()
+        .unwrap()
+        .as_v2()
+        .unwrap()
+        .iter()
+        .filter(|batch| !batch.attributes.is_control_batch())
+        .flat_map(|batch| &batch.records)
+        .collect();
+    assert2::assert!(records.len() == 1);
+    assert2::assert!(records[0].key.as_deref() == Some(b"17".as_slice()));
+    assert2::assert!(records[0].value.as_deref() == Some(body.as_ref()));
+    let actual_headers: Vec<_> = records[0]
+        .headers
+        .iter()
+        .map(|h| (h.key.as_str(), h.value.as_deref()))
+        .collect();
+    assert2::assert!(
+        actual_headers
+            == vec![
+                ("content-type", Some(b"application/json".as_slice())),
+                ("x-gitlab-event", Some(b"Merge Request Hook".as_slice())),
+                ("webhook-id", Some(b"delivery-42".as_slice())),
+                ("webhook-timestamp", Some(timestamp.as_bytes())),
+            ]
+    );
+
+    let (state, no_dedup_token, _) = webhook_state(&bootstrap, "no-dedup", &config, false).await;
+    let response = webhook_router(state)
+        .oneshot(request(&signature))
+        .await
+        .unwrap();
+    assert2::assert!(response.status() == StatusCode::SERVICE_UNAVAILABLE);
+    no_dedup_token.cancel();
+    replacement_token.cancel();
+    broker.shutdown().await;
+}
 
 /// A valid HMAC produces into the target topic and returns 200.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

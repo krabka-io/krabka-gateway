@@ -36,6 +36,10 @@ struct Forwarding {
 }
 
 impl ProduceCore {
+    pub(crate) fn has_dedup(&self) -> bool {
+        self.dedup.is_some()
+    }
+
     /// Build a plain idempotent producer (`acks=all`, no transactional id).
     /// # Errors
     /// Returns an error when configuration is invalid, protocol encoding fails, the broker rejects the request, or transport I/O fails.

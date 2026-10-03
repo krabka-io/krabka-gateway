@@ -627,11 +627,11 @@ async fn run(
     );
     store.set_membership(publisher);
 
-    spawn_ownership_consumer(&config, &store, &shutdown, &readiness);
     spawn_readiness_watcher(
         store.clone(),
         readiness.clone(),
         config.runtime.readiness_poll_interval,
+        shutdown.clone(),
     );
 
     let engine = Arc::new(DedupEngine::new_with_policy(
@@ -640,9 +640,11 @@ async fn run(
         &config.dedup_txn_id_prefix,
         config.dedup_topic.clone(),
         config.dedup_partitions,
-        store,
+        store.clone(),
         (config.broker_security.clone(), &config.runtime),
     ));
+    store.set_engine(&engine);
+    spawn_ownership_consumer(&config, &store, &shutdown, &readiness);
 
     // Step 4: build the forwarder — mTLS https when TLS is configured, plaintext http otherwise.
     let forwarder = match config.tls.as_ref() {
@@ -696,7 +698,7 @@ async fn run(
     });
 
     let app = krabka_gateway::router(state.clone())
-        .merge(health::router(readiness))
+        .merge(health::router(readiness.clone()))
         .merge(forward::forward_router(state.clone()))
         .merge(krabka_gateway::webhook::webhook_router(state.clone()))
         .merge(krabka_gateway::metrics::router())
@@ -709,8 +711,10 @@ async fn run(
     };
 
     let sd = shutdown.clone();
+    let shutdown_readiness = readiness.clone();
     tokio::spawn(async move {
-        tokio::signal::ctrl_c().await.ok();
+        shutdown_signal().await;
+        shutdown_readiness.set_not_ready();
         sd.cancel();
     });
 
@@ -851,16 +855,48 @@ fn ownership_consumer_inputs(config: &GatewayConfig) -> (String, String, String,
     )
 }
 
-fn spawn_readiness_watcher(store: Arc<DedupStore>, readiness: Readiness, poll_interval: Time) {
+fn spawn_readiness_watcher(
+    store: Arc<DedupStore>,
+    readiness: Readiness,
+    poll_interval: Time,
+    shutdown: CancellationToken,
+) {
     tokio::spawn(async move {
         loop {
-            if store.has_warmed_once() {
+            if store.is_warm() {
                 readiness.set_ready();
-                break;
+            } else {
+                readiness.set_not_ready();
             }
-            tokio::time::sleep(poll_interval.to_std()).await;
+            tokio::select! {
+                () = shutdown.cancelled() => {
+                    readiness.set_not_ready();
+                    return;
+                }
+                () = tokio::time::sleep(poll_interval.to_std()) => {}
+            }
         }
     });
+}
+
+async fn shutdown_signal() {
+    #[cfg(unix)]
+    {
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(mut terminate) => {
+                tokio::select! {
+                    _ = tokio::signal::ctrl_c() => {}
+                    _ = terminate.recv() => {}
+                }
+            }
+            Err(error) => {
+                tracing::error!(%error, "cannot register SIGTERM handler");
+                tokio::signal::ctrl_c().await.ok();
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    tokio::signal::ctrl_c().await.ok();
 }
 
 /// Build the DLQ producer and spawn one delivery task per outbound subscription.

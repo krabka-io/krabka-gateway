@@ -1,0 +1,19 @@
+# Alternate External Secrets Operator v2 template for every enabled hook event.
+# Publish as the existing gitlab-webhooks-template ConfigMap; ESO renders it.
+[[endpoints]]
+name = "gitlab-events"
+target_topic = "gitlab.events"
+principal = "webhook:gitlab-events"
+signature_mode = "standard_webhooks"
+secret = {{ .signing_token | toJson }}
+timestamp_tolerance = "5m"
+max_body = "25MB"
+forward_headers = [
+  "content-type",
+  "x-gitlab-event",
+  "x-gitlab-instance",
+  "x-gitlab-event-uuid",
+  "x-gitlab-webhook-uuid",
+]
+# No key_source: pushes, tags, issues, notes, and other events need no MR fields.
+# Standard Webhooks uses the signed webhook-id for deduplication automatically.

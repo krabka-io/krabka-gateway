@@ -59,6 +59,38 @@ jobs:
       - name: Run live-compatible SDK conformance
         run: cargo run -p krabka-sdk-conformance --bin conformance -- --adapter sdks/go/bin/conformance-adapter --vectors crates/sdk-conformance/vectors/v1 --live-substrate --live-compatible-only
 
+      - uses: actions/setup-go@v7.0.0
+        with:
+          go-version-file: demo/gitlab/streams-go/go.mod
+          cache-dependency-path: demo/gitlab/streams-go/go.sum
+      - name: Verify GitLab MR consumer example
+        working-directory: demo/gitlab/streams-go
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            printf '%s\n' "$unformatted"
+            exit 1
+          fi
+          go vet ./...
+          go test ./...
+          go build -o "$RUNNER_TEMP/gitlab-mr-consumer" .
+
+      - uses: actions/setup-go@v7.0.0
+        with:
+          go-version-file: demo/gitlab/consumer-franz-go/go.mod
+          cache-dependency-path: demo/gitlab/consumer-franz-go/go.sum
+      - name: Verify GitLab all-events franz-go example
+        working-directory: demo/gitlab/consumer-franz-go
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            printf '%s\n' "$unformatted"
+            exit 1
+          fi
+          go vet ./...
+          go test ./...
+          go build -o "$RUNNER_TEMP/gitlab-json-consumer" .
+
   # The live round trip: the gateway image built from this commit, a pinned
   # broker image, and the Go smoke against the published gateway port. It
   # runs only on a manual dispatch with the `docker_gate` input, because the

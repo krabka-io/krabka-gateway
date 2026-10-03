@@ -33,6 +33,8 @@ pub struct WebhooksFile {
 pub struct WebhookEndpoint {
     pub name: String,
     pub target_topic: String,
+    /// `standard_webhooks` signs the message ID, timestamp, and original body.
+    pub signature_mode: Option<SignatureMode>,
     /// Service principal this endpoint produces as, for authz. Default
     /// `webhook:{name}`.
     pub principal: Option<String>,
@@ -59,6 +61,8 @@ pub struct WebhookEndpoint {
     pub idempotency_source: Option<String>,
     /// Optional record-key source: `header:<Name>` or `json:<JSONPath expr>`.
     pub key_source: Option<String>,
+    /// HTTP headers to preserve as record metadata. Secret headers are rejected.
+    pub forward_headers: Option<Vec<String>>,
     /// Maximum accepted body size, e.g. `"1MiB"` (default 1 MiB).
     #[serde(
         default,
@@ -105,10 +109,19 @@ pub enum SigEncoding {
     Base64,
 }
 
+/// Signature protocol for a named webhook endpoint.
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SignatureMode {
+    /// Standard Webhooks HMAC-SHA256 authentication.
+    StandardWebhooks,
+}
+
 /// Validated and compiled endpoint config, the runtime form.
 #[derive(Debug, Clone)]
 pub struct CompiledWebhook {
     pub target_topic: String,
+    pub signature_mode: Option<SignatureMode>,
     pub principal: String,
     /// Raw secret bytes. `None` means signature verification is disabled.
     pub secret: Option<Vec<u8>>,
@@ -122,6 +135,7 @@ pub struct CompiledWebhook {
     pub timestamp_tolerance: Time,
     pub idempotency_source: Option<Source>,
     pub key_source: Option<Source>,
+    pub forward_headers: Vec<axum::http::HeaderName>,
     pub max_body: ByteSize,
     /// Schema Registry subject to validate and serialize the request body
     /// against. `None` ⇒ the gateway produces the body raw, with no schema
@@ -143,8 +157,32 @@ impl WebhooksFile {
         for e in &self.endpoints {
             let ctx = format!("[webhooks {}]", e.name);
 
-            // `secret` and `signature_header` must both be present or both absent.
-            if e.secret.is_some() != e.signature_header.is_some() {
+            let secret = if e.signature_mode == Some(SignatureMode::StandardWebhooks) {
+                if e.signature_header.is_some()
+                    || e.signature_encoding.is_some()
+                    || e.signature_prefix.is_some()
+                    || e.timestamp_header.is_some()
+                {
+                    return Err(format!(
+                        "{ctx}: standard_webhooks sets signature and timestamp headers"
+                    ));
+                }
+                let token = e.secret.as_deref().ok_or_else(|| {
+                    format!("{ctx}: standard_webhooks requires a signing token in secret")
+                })?;
+                let key = B64STD
+                    .decode(token.strip_prefix("whsec_").unwrap_or(token))
+                    .map_err(|_| format!("{ctx}: invalid Standard Webhooks signing token"))?;
+                if key.is_empty() {
+                    return Err(format!("{ctx}: signing token must not be empty"));
+                }
+                Some(key)
+            } else {
+                e.secret.as_ref().map(|s| s.clone().into_bytes())
+            };
+
+            // Generic HMAC endpoints need both settings.
+            if e.signature_mode.is_none() && e.secret.is_some() != e.signature_header.is_some() {
                 return Err(format!(
                     "{ctx}: `secret` and `signature_header` must be set together"
                 ));
@@ -165,9 +203,19 @@ impl WebhooksFile {
                 }
             };
 
+            if e.signature_mode.is_some()
+                && e.idempotency_source
+                    .as_deref()
+                    .is_some_and(|source| source != "header:webhook-id")
+            {
+                return Err(format!(
+                    "{ctx}: standard_webhooks uses the signed webhook-id for deduplication"
+                ));
+            }
             let idempotency_source = e
                 .idempotency_source
                 .as_deref()
+                .or_else(|| e.signature_mode.map(|_| "header:webhook-id"))
                 .map(|s| Source::parse(s, &format!("{ctx}.idempotency_source")))
                 .transpose()?;
 
@@ -176,6 +224,27 @@ impl WebhooksFile {
                 .as_deref()
                 .map(|s| Source::parse(s, &format!("{ctx}.key_source")))
                 .transpose()?;
+
+            let forward_headers =
+                e.forward_headers
+                    .as_deref()
+                    .unwrap_or_default()
+                    .iter()
+                    .map(|name| {
+                        let header: axum::http::HeaderName = name
+                            .parse()
+                            .map_err(|_| format!("{ctx}: invalid forward_headers name"))?;
+                        if matches!(
+                            header.as_str(),
+                            "authorization" | "cookie" | "x-gitlab-token" | "webhook-signature"
+                        ) || e.signature_header.as_deref().is_some_and(|signature| {
+                            signature.eq_ignore_ascii_case(header.as_str())
+                        }) {
+                            return Err(format!("{ctx}: cannot forward authentication headers"));
+                        }
+                        Ok(header)
+                    })
+                    .collect::<Result<Vec<_>, String>>()?;
 
             // Validate the schema format string (defaults to JSON). This is
             // checked even when `schema_subject` is absent so a stray
@@ -194,11 +263,12 @@ impl WebhooksFile {
                 e.name.clone(),
                 CompiledWebhook {
                     target_topic: e.target_topic.clone(),
+                    signature_mode: e.signature_mode,
                     principal: e
                         .principal
                         .clone()
                         .unwrap_or_else(|| format!("webhook:{}", e.name)),
-                    secret: e.secret.as_ref().map(|s| s.clone().into_bytes()),
+                    secret,
                     signature_header: e.signature_header.clone(),
                     signature_encoding,
                     signature_prefix: e.signature_prefix.clone(),
@@ -206,6 +276,7 @@ impl WebhooksFile {
                     timestamp_tolerance,
                     idempotency_source,
                     key_source,
+                    forward_headers,
                     max_body,
                     schema_subject: e.schema_subject.clone(),
                     schema_format,
@@ -310,7 +381,7 @@ pub(crate) fn verify_signature(
 /// Extract a value from an HTTP header or a `JSONPath` expression over the body.
 ///
 /// Returns `None` when the header is absent, when the header is not UTF-8, or
-/// when the `JSONPath` gives no string result.
+/// when the `JSONPath` gives no string or number result.
 #[allow(dead_code)] // used by webhook.rs
 pub(crate) fn extract_source(
     src: &Source,
@@ -323,8 +394,12 @@ pub(crate) fn extract_source(
             let json = body_json?;
             let refs = js_path_process(q, json).ok()?;
             for r in refs {
-                if let Some(s) = r.val.as_str() {
-                    return Some(s.to_string());
+                match r.val {
+                    serde_json::Value::String(value) if !value.is_empty() => {
+                        return Some(value.clone());
+                    }
+                    serde_json::Value::Number(value) => return Some(value.to_string()),
+                    _ => {}
                 }
             }
             None
@@ -551,6 +626,96 @@ principal = "svc:stripe-ingest"
     }
 
     #[test]
+    fn compile_standard_webhooks_decodes_key_and_uses_signed_message_id() {
+        for prefix in ["", "whsec_"] {
+            let input = format!(
+                r#"
+[[endpoints]]
+name = "standard"
+target_topic = "events"
+signature_mode = "standard_webhooks"
+secret = "{prefix}c3RhbmRhcmRfd2ViaG9va3NfdGVzdF9zZWNyZXRfMzIh"
+key_source = "json:$.object_attributes.id"
+forward_headers = ["X-Gitlab-Event", "webhook-id"]
+"#
+            );
+            let file: WebhooksFile = toml::from_str(&input).expect("parse");
+            let compiled = file.compile().expect("compile");
+            let ep = &compiled["standard"];
+            assert2::assert!(ep.signature_mode == Some(SignatureMode::StandardWebhooks));
+            assert2::assert!(
+                ep.secret.as_deref() == Some(b"standard_webhooks_test_secret_32!".as_slice())
+            );
+            assert2::assert!(
+                matches!(ep.idempotency_source.as_ref(), Some(Source::Header(name)) if name == "webhook-id")
+            );
+            let body = serde_json::json!({"object_attributes": {"id": 17}});
+            assert2::assert!(
+                extract_source(
+                    ep.key_source.as_ref().expect("key source"),
+                    &axum::http::HeaderMap::new(),
+                    Some(&body)
+                ) == Some("17".to_string())
+            );
+            assert2::assert!(
+                ep.forward_headers
+                    .iter()
+                    .map(axum::http::HeaderName::as_str)
+                    .collect::<Vec<_>>()
+                    == vec!["x-gitlab-event", "webhook-id"]
+            );
+        }
+    }
+
+    #[test]
+    fn compile_standard_webhooks_rejects_invalid_or_conflicting_settings() {
+        let base = r#"
+[[endpoints]]
+name = "standard"
+target_topic = "events"
+signature_mode = "standard_webhooks"
+"#;
+        for settings in [
+            "",
+            "secret = 'not-base64!'",
+            "secret = 'whsec_'",
+            "secret = 'a2V5'\nsignature_header = 'X-Sig'",
+            "secret = 'a2V5'\nsignature_encoding = 'base64'",
+            "secret = 'a2V5'\nsignature_prefix = 'v1,'",
+            "secret = 'a2V5'\ntimestamp_header = 'webhook-timestamp'",
+            "secret = 'a2V5'\nidempotency_source = 'json:$.id'",
+            "secret = 'a2V5'\nforward_headers = ['invalid name']",
+        ] {
+            let file: WebhooksFile = toml::from_str(&format!("{base}{settings}")).expect("parse");
+            assert2::assert!(file.compile().is_err());
+        }
+    }
+
+    #[test]
+    fn compile_rejects_forwarded_authentication_headers() {
+        for header in [
+            "Authorization",
+            "Cookie",
+            "X-Gitlab-Token",
+            "Webhook-Signature",
+            "X-Custom-Signature",
+        ] {
+            let input = format!(
+                r#"
+[[endpoints]]
+name = "custom"
+target_topic = "events"
+secret = "key"
+signature_header = "x-custom-signature"
+forward_headers = ["{header}"]
+"#
+            );
+            let file: WebhooksFile = toml::from_str(&input).expect("parse");
+            assert2::assert!(file.compile().is_err());
+        }
+    }
+
+    #[test]
     fn compile_error_cases() {
         let secret_without_header = r#"
 [[endpoints]]
@@ -668,6 +833,7 @@ target_topic = "t"
         let endpoint = WebhookEndpoint {
             name: "github".to_string(),
             target_topic: "events".to_string(),
+            signature_mode: None,
             principal: None,
             secret: None,
             signature_header: None,
@@ -677,6 +843,7 @@ target_topic = "t"
             timestamp_tolerance: Some(minutes(5)),
             idempotency_source: None,
             key_source: None,
+            forward_headers: None,
             max_body: Some(mebibytes(3)),
             schema_subject: None,
             schema_format: None,
@@ -730,6 +897,31 @@ target_topic = "t"
                 "$.id",
                 Some(serde_json::json!({"id": "event-42", "type": "push"})),
                 Some("event-42"),
+            ),
+            (
+                "numeric",
+                "$.id",
+                Some(serde_json::json!({"id": 17})),
+                Some("17"),
+            ),
+            (
+                "negative",
+                "$.id",
+                Some(serde_json::json!({"id": -17})),
+                Some("-17"),
+            ),
+            ("empty", "$.id", Some(serde_json::json!({"id": ""})), None),
+            (
+                "boolean",
+                "$.id",
+                Some(serde_json::json!({"id": true})),
+                None,
+            ),
+            (
+                "object",
+                "$.id",
+                Some(serde_json::json!({"id": {"nested": 17}})),
+                None,
             ),
             (
                 "no_match",

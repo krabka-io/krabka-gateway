@@ -20,7 +20,9 @@ use std::{
 };
 
 use bytes::Bytes;
-use krabka_client_consumer::{AutoOffsetReset, Consumer, IsolationLevel};
+use krabka_client_consumer::{
+    AutoOffsetReset, Consumer, ConsumerRebalanceListener, IsolationLevel, RebalanceListenerError,
+};
 use krabka_client_producer::{Acks, Producer, ProducerRecord};
 use krabka_units::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -161,6 +163,8 @@ impl MembershipStore {
             .subscribe(vec![membership_topic])
             .isolation_level(IsolationLevel::ReadCommitted)
             .auto_offset_reset(AutoOffsetReset::Earliest)
+            .enable_auto_commit(false)
+            .rebalance_listener(Box::new(MembershipReplay))
             .assignors(vec![krabka_client_consumer::Assignor::CooperativeSticky])
             .maybe_security(security)
             .build()
@@ -295,5 +299,125 @@ impl MembershipPublisher {
             .await
             .map_err(GatewayError::Producer)?;
         Ok(())
+    }
+}
+
+/// Every new assignment rebuilds the broadcast view, regardless of committed
+/// group offsets left by an earlier process.
+struct MembershipReplay;
+
+#[async_trait::async_trait]
+impl ConsumerRebalanceListener for MembershipReplay {
+    async fn on_partitions_revoked(
+        &mut self,
+        _consumer: &Consumer,
+        _partitions: &[(String, i32)],
+    ) -> Result<(), RebalanceListenerError> {
+        Ok(())
+    }
+
+    async fn on_partitions_assigned(
+        &mut self,
+        consumer: &Consumer,
+        partitions: &[(String, i32)],
+    ) -> Result<(), RebalanceListenerError> {
+        if !partitions.is_empty() {
+            consumer.seek_to_beginning(partitions).await?;
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{collections::HashSet, sync::Arc, time::Duration};
+
+    use krabka_broker::{Broker, BrokerConfig};
+    use krabka_client_consumer::{AutoOffsetReset, Consumer};
+    use tokio_util::sync::CancellationToken;
+
+    use super::{MembershipPublisher, MembershipStore};
+    use crate::dedup::topic::{InternalTopicPolicy, ensure_membership_topic};
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cold_membership_reader_replays_previously_committed_group_offsets() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let broker = Broker::start(BrokerConfig::for_tests(dir.path().to_path_buf()))
+            .await
+            .unwrap();
+        let bootstrap = broker.listen_addr().to_string();
+        let topic = "cold-membership";
+        let group = "cold-membership-group";
+        ensure_membership_topic(
+            &bootstrap,
+            topic,
+            &InternalTopicPolicy {
+                replication_factor: 1,
+                ..Default::default()
+            },
+            None,
+        )
+        .await
+        .unwrap();
+        let publisher = MembershipPublisher::new(
+            &bootstrap,
+            "membership-publisher",
+            "node-1".into(),
+            "https://owner.example".into(),
+            topic.into(),
+            None,
+        )
+        .await
+        .unwrap();
+        publisher.publish(&HashSet::from([0, 1])).await.unwrap();
+
+        let mut prior = Consumer::builder()
+            .bootstrap(bootstrap.clone())
+            .group_id(group)
+            .subscribe(vec![topic.into()])
+            .auto_offset_reset(AutoOffsetReset::Earliest)
+            .enable_auto_commit(false)
+            .build()
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(20), async {
+            loop {
+                if !prior
+                    .poll(krabka_units::millis(100))
+                    .await
+                    .unwrap()
+                    .is_empty()
+                {
+                    break;
+                }
+            }
+        })
+        .await
+        .unwrap();
+        prior.commit_sync().await.unwrap();
+        prior.close().await.unwrap();
+
+        let store = Arc::new(MembershipStore::new());
+        let shutdown = CancellationToken::new();
+        let reader = tokio::spawn(Arc::clone(&store).run_membership(
+            bootstrap,
+            "cold-membership-reader".into(),
+            topic.into(),
+            group.into(),
+            shutdown.clone(),
+            None,
+        ));
+        tokio::time::timeout(Duration::from_secs(20), async {
+            while store.owner_of(1).is_none() {
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert2::assert!(store.owner_of(0) == Some("https://owner.example".into()));
+        assert2::assert!(store.owner_of(1) == Some("https://owner.example".into()));
+        shutdown.cancel();
+        reader.await.unwrap().unwrap();
+        broker.shutdown().await;
     }
 }

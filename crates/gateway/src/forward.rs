@@ -11,7 +11,7 @@
 //! INTERNAL protocol is deliberately separate from the public Connect `Send`
 //! API, so the two can evolve independently.
 
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
 use axum::{
     Extension, Json, Router,
@@ -34,8 +34,8 @@ use crate::{
     types::{GatewayRecord, RecordOutcome},
 };
 
-/// Wire form of a forwarded record. Bytes are JSON arrays, so no extra
-/// dependency is needed.
+/// Wire form of a forwarded record. Bytes use the JSON arrays expected by
+/// `/internal/v1/forward`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ForwardRecord {
     pub topic: String,
@@ -178,10 +178,17 @@ pub struct Forwarder {
 
 impl Forwarder {
     /// Plaintext forwarder over `http://`, for a gateway that runs without TLS.
+    ///
+    /// # Panics
+    /// Panics if the HTTP client cannot be initialized.
     #[must_use]
     pub fn new() -> Self {
         Self {
-            http: reqwest::Client::new(),
+            http: reqwest::Client::builder()
+                .connect_timeout(Duration::from_secs(2))
+                .timeout(Duration::from_secs(5))
+                .build()
+                .expect("build forward client"),
             scheme: "http",
         }
     }
@@ -198,6 +205,8 @@ impl Forwarder {
         // handed the BARE config (passing `Some(cfg)` double-wraps and fails at
         // runtime with "Unknown TLS backend").
         let http = reqwest::Client::builder()
+            .connect_timeout(Duration::from_secs(2))
+            .timeout(Duration::from_secs(5))
             .use_preconfigured_tls(Arc::unwrap_or_clone(client_config))
             .build()
             .map_err(|e| GatewayError::Forward(format!("build tls forward client: {e}")))?;
@@ -262,6 +271,10 @@ impl Forwarder {
                     Err(GatewayError::Forward(e.message))
                 }
             },
+            Err(e) if e.is_timeout() => {
+                metrics().record_forward("unavailable");
+                Err(GatewayError::Unavailable)
+            }
             // A 2xx with an undecodable body is a malformed owner response (fatal);
             // a non-2xx with no JSON body is a transient transport-level failure.
             Err(e) if status.is_success() => {
@@ -425,6 +438,56 @@ mod tests {
     };
 
     const N: u32 = 4;
+
+    #[test]
+    fn forwarded_payload_is_a_byte_array_and_round_trips() {
+        let record = ForwardRecord {
+            topic: "events".into(),
+            key: None,
+            value: vec![0, 255, 17],
+            headers: vec![],
+            partition: None,
+            timestamp_ms: None,
+            idempotency_key: None,
+            principal: None,
+        };
+        let mut json = serde_json::to_value(&record).unwrap();
+        assert2::assert!(json["value"] == serde_json::json!([0, 255, 17]));
+        assert2::assert!(
+            serde_json::from_value::<ForwardRecord>(json.clone())
+                .unwrap()
+                .value
+                == record.value
+        );
+        for invalid in [serde_json::json!("AP8R"), serde_json::json!([0, 256])] {
+            json["value"] = invalid;
+            assert2::assert!(serde_json::from_value::<ForwardRecord>(json.clone()).is_err());
+        }
+    }
+
+    #[tokio::test]
+    async fn forward_deadline_includes_the_response_body() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        let app = Router::new().route(
+            "/internal/v1/forward",
+            post(|| async {
+                Response::new(Body::from_stream(futures_util::stream::pending::<
+                    Result<bytes::Bytes, std::io::Error>,
+                >()))
+            }),
+        );
+        let server = tokio::spawn(async move { axum::serve(listener, app).await });
+        let record = forward_record("events").into_record();
+        let result = tokio::time::timeout(
+            Duration::from_secs(7),
+            Forwarder::new().forward(&addr, &record, &crate::handlers::anonymous_principal()),
+        )
+        .await
+        .expect("forward response must respect the five-second deadline");
+        server.abort();
+        check!(matches!(result, Err(GatewayError::Unavailable)));
+    }
 
     /// Test double that always denies. It drives `forward_handler`'s
     /// authz-deny arm.

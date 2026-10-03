@@ -1,0 +1,22 @@
+# External Secrets Operator v2 template. Publish this file as the
+# gitlab-webhooks-template ConfigMap; external-secret.yaml renders the Secret.
+# The complete GitLab signing token comes from the configured secret store.
+[[endpoints]]
+name = "gitlab-merge-requests"
+target_topic = "gitlab.merge-requests"
+principal = "webhook:gitlab-merge-requests"
+signature_mode = "standard_webhooks"
+secret = {{ .signing_token | toJson }}
+timestamp_tolerance = "5m"
+max_body = "25MB"
+key_source = "json:$.object_attributes.id"
+forward_headers = [
+  "content-type",
+  "x-gitlab-event",
+  "x-gitlab-instance",
+  "x-gitlab-event-uuid",
+  "x-gitlab-webhook-uuid",
+]
+# Standard Webhooks automatically uses webhook-id for deduplication and stores
+# webhook-id and webhook-timestamp. Do not set idempotency_source or a custom
+# signature_header, signature_encoding, signature_prefix, or timestamp_header.
