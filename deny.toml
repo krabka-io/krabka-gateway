@@ -81,7 +81,18 @@ allow-git = [
     # DataFusion pin behind the gateway's `arrow` feature, for the subscription
     # filter evaluator.
     "https://github.com/apache/datafusion",
-    # The sibling repositories, pinned by revision in [patch.crates-io].
+    # The sibling repositories, pinned by revision in [patch.crates-io    "https://github.com/krabka-io/krabka-broker",
+    "https://github.com/krabka-io/krabka-cli",
+    "https://github.com/krabka-io/krabka-client-rs",
+    "https://github.com/krabka-io/krabka-connect",
+    "https://github.com/krabka-io/krabka-gateway",
+    "https://github.com/krabka-io/krabka-o11y",
+    "https://github.com/krabka-io/krabka-operator",
+    "https://github.com/krabka-io/krabka-protocol",
+    "https://github.com/krabka-io/krabka-rebalancer",
+    "https://github.com/krabka-io/krabka-schema-registry",
+    "https://github.com/krabka-io/krabka-streams-rs",
+].
     "https://github.com/krabka-io/krabka-broker",
     "https://github.com/krabka-io/krabka-client-rs",
     "https://github.com/krabka-io/krabka-protocol",
