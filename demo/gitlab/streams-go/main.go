@@ -17,6 +17,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/krabka-io/krabka-streams-go/columnar"
 	"github.com/twmb/franz-go/pkg/kgo"
+	gitlab "gitlab.com/gitlab-org/api/client-go"
 )
 
 type mrSummary struct {
@@ -31,28 +32,17 @@ type mrSummary struct {
 type mrSerde struct{}
 
 func (mrSerde) Deserialize(_ string, data []byte) (mrSummary, error) {
-	var payload struct {
-		ObjectKind string `json:"object_kind"`
-		Project    struct {
-			ID int64 `json:"id"`
-		} `json:"project"`
-		Attributes struct {
-			ID     int64  `json:"id"`
-			IID    int64  `json:"iid"`
-			Title  string `json:"title"`
-			State  string `json:"state"`
-			Action string `json:"action"`
-		} `json:"object_attributes"`
-	}
+	var payload gitlab.MergeEvent
 	if err := json.Unmarshal(data, &payload); err != nil {
 		return mrSummary{}, err
 	}
-	if payload.ObjectKind != "merge_request" || payload.Attributes.ID <= 0 || payload.Project.ID <= 0 || payload.Attributes.IID <= 0 {
+	attributes := payload.ObjectAttributes
+	if payload.ObjectKind != "merge_request" || attributes.ID <= 0 || payload.Project.ID <= 0 || attributes.IID <= 0 {
 		return mrSummary{}, errors.New("expected a merge request with positive MR, project, and internal IDs")
 	}
 	return mrSummary{
-		MRID: payload.Attributes.ID, ProjectID: payload.Project.ID, IID: payload.Attributes.IID,
-		Title: payload.Attributes.Title, State: payload.Attributes.State, Action: payload.Attributes.Action,
+		MRID: attributes.ID, ProjectID: payload.Project.ID, IID: attributes.IID,
+		Title: attributes.Title, State: attributes.State, Action: attributes.Action,
 	}, nil
 }
 

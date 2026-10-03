@@ -49,6 +49,41 @@ func TestTopologyPreservesMetadataAndExtractsSummary(t *testing.T) {
 	}
 }
 
+func TestRealisticMergeRequestPayload(t *testing.T) {
+	topology, err := buildTopology("input")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer topology.Close()
+	r := record(`{
+		"object_kind":"merge_request", "event_type":"merge_request",
+		"user":{"id":42,"name":"Example User","username":"example","avatar_url":null},
+		"project":{"id":9007199254740995,"name":"Example","path_with_namespace":"group/example","visibility":"private"},
+		"object_attributes":{
+			"id":9007199254740993,"iid":3,"title":"Fix example","state":"opened","action":"update",
+			"source_branch":"fix","target_branch":"main","created_at":"2026-10-03T12:00:00.000Z",
+			"updated_at":"2026-10-03T12:01:00.000Z","last_edited_at":null,"merge_error":null,"head_pipeline_id":null,
+			"assignee_id":null,"assignee_ids":[],"reviewer_ids":[42],
+			"last_commit":{"id":"abc123","message":"Fix example","timestamp":"2026-10-03T12:00:00Z","author":{"name":"Example User","email":"example@example.com"}}
+		},
+		"changes":{"title":{"previous":"Old title","current":"Fix example"}},
+		"labels":[],"assignees":[],"reviewers":[],"repository":null
+	}`)
+	r.Key = []byte("9007199254740993")
+	var output bytes.Buffer
+	committed := false
+	if err := processBatch(topology, "input", []*kgo.Record{r}, &output, func() error {
+		committed = true
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	want := "{\"mr_id\":9007199254740993,\"project_id\":9007199254740995,\"iid\":3,\"title\":\"Fix example\",\"state\":\"opened\",\"action\":\"update\",\"delivery_id\":\"delivery-42\"}\n"
+	if !committed || output.String() != want {
+		t.Fatalf("committed = %v, output = %s, want %s", committed, output.String(), want)
+	}
+}
+
 type failingWriter struct{}
 
 func (failingWriter) Write([]byte) (int, error) { return 0, io.ErrClosedPipe }

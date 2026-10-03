@@ -198,13 +198,15 @@ cannot reconstruct every missed transition.
 ## Go consumer example
 
 The example consumes directly from the broker with an ordinary consumer group,
-uses a `krabka-streams-go` columnar topology to decode merge request JSON, and
-writes a JSON summary with its delivery ID to stdout. It uses read-committed
+uses a `krabka-streams-go` columnar topology and GitLab's
+[client-go `MergeEvent` type](https://pkg.go.dev/gitlab.com/gitlab-org/api/client-go#MergeEvent)
+to decode merge request JSON, and writes a JSON summary with its delivery ID
+to stdout. The summary is the example's output projection. It uses read-committed
 isolation and commits offsets only after the complete polled batch is processed
 and written successfully. Decode, output, and commit failures stop the process;
 SIGINT/SIGTERM cancel polling and close the consumer.
 
-With Go 1.26.5 or newer, run from this directory:
+With Go 1.27.1 or newer, run from this directory:
 
 ```sh
 cd streams-go
@@ -213,8 +215,8 @@ go run . -brokers 127.0.0.1:9092 \
 ```
 
 Instances with the same group share partitions; use a different group for a
-separate application that needs every event. The dependency is pinned to a
-specific upstream revision in `go.mod` and `go.sum`.
+separate application that needs every event. Dependencies are pinned in
+`go.mod` and `go.sum`, including the streams library's upstream revision.
 
 Stdout is an example output, and delivery is at least once: a crash or uncertain
 offset commit can repeat already printed summaries. Replace output with a
