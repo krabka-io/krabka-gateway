@@ -38,7 +38,7 @@ jobs:
           go run github.com/bufbuild/buf/cmd/buf@v1.73.0 generate
           git diff --exit-code -- buf.gen.yaml sdks/ts/gen
       - name: Install dependencies
-        run: npm ci
+        run: npm ci --engine-strict
         working-directory: sdks/ts
       - name: Build SDK
         run: npm run build

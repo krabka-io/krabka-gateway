@@ -32,10 +32,10 @@ Arrow record batches the subscription filter reads.
 
 | SDK | Path | Toolchain |
 | --- | --- | --- |
-| C++ | [`sdks/cpp`](sdks/cpp) | CMake, nghttp2, protobuf |
-| Go | [`sdks/go`](sdks/go) | Go modules, Connect |
+| C++ | [`sdks/cpp`](sdks/cpp) | CMake, nghttp2, protobuf 3.21.12 (Ubuntu 24.04) |
+| Go | [`sdks/go`](sdks/go) | Go 1.27+, Connect |
 | Java | [`sdks/java`](sdks/java) | Gradle, Kotlin, connect-kotlin |
-| TypeScript | [`sdks/ts`](sdks/ts) | npm, `@bufbuild/protobuf` |
+| TypeScript | [`sdks/ts`](sdks/ts) | Node.js 24+, npm, `@bufbuild/protobuf` |
 
 Each SDK ships a `conformance-adapter` executable. The runner drives that
 executable over JSON on stdio, so one set of vectors gates all five SDKs.

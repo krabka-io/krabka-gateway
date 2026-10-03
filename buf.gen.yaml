@@ -16,5 +16,6 @@ plugins:
     out: sdks/java/gen
   - remote: buf.build/connectrpc/kotlin:v0.9.0
     out: sdks/java/gen
-  - remote: buf.build/protocolbuffers/cpp:v36.2
+  # Match Ubuntu 24.04's protobuf 3.21.12 C++ runtime (see sdk-cpp.yml).
+  - remote: buf.build/protocolbuffers/cpp:v21.12
     out: sdks/cpp/gen
