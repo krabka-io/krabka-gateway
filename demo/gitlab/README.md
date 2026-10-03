@@ -7,14 +7,12 @@ consumer. [consumer-go](consumer-go) provides a runnable Go example using
 
 ## Configure the hook
 
-1. Copy [webhooks.toml.example](webhooks.toml.example) into a secret-mounted file,
-   for example `/run/secrets/gitlab-webhooks.toml`.
-2. In the GitLab project or group, open **Settings > Webhooks** and add
+1. In the GitLab project or group, open **Settings > Webhooks** and add
    `https://hooks.example.com/v1/webhooks/gitlab-merge-requests`.
-3. Select **Generate signing token** and save the complete `whsec_...` token
-   into the file's `secret` field. The placeholder is intentionally invalid.
-   Keep the populated file out of source control and logs.
-4. Enable only **Merge request events**, leave the default JSON payload, and
+2. Select **Generate signing token** and store the complete `whsec_...` token
+   as a text value in your external secret backend. Keep it out of source
+   control and logs; do not base64-encode or decode it yourself.
+3. Enable only **Merge request events**, leave the default JSON payload, and
    keep SSL verification enabled. Do not configure a custom payload template.
 
 Use a public HTTPS edge with a trusted certificate. Preserve the original body
@@ -22,6 +20,70 @@ and the `webhook-id`, `webhook-timestamp`, and `webhook-signature` headers throu
 the proxy. JSON reserialization invalidates the signature. Keep gateway clocks
 synchronized: this example accepts signed timestamps within five minutes.
 [GitLab signing tokens](https://docs.gitlab.com/user/project/integrations/webhooks/#signing-tokens).
+
+## Load the signing token with External Secrets Operator
+
+Install ESO with the `external-secrets.io/v1` API and configure a
+`ClusterSecretStore` for your backend using its supported identity mechanism.
+The example assumes an existing store named `gitlab-webhooks` and a remote
+secret named `gitlab-webhook-signing-token`. Change `secretStoreRef` and
+`remoteRef.key` in [external-secret.yaml](external-secret.yaml) to match your
+store. For a namespaced `SecretStore`, change the reference's `kind` as well.
+If the provider stores a JSON object, set `remoteRef.property` to the token's
+field instead of fetching the whole object.
+
+From the repository root, publish the non-secret TOML template as a ConfigMap
+and apply the ExternalSecret in the namespace where the gateway runs:
+
+```sh
+kubectl -n gitlab create configmap gitlab-webhooks-template \
+  --from-file=webhooks.toml=demo/gitlab/webhooks.toml.example \
+  --dry-run=client -o yaml | kubectl apply -f -
+kubectl -n gitlab apply -f demo/gitlab/external-secret.yaml
+kubectl -n gitlab wait --for=condition=Ready externalsecret/gitlab-webhooks \
+  --timeout=120s
+```
+
+Create the namespace first if needed. ESO fetches the signing token and renders
+Secret `gitlab-webhooks`, containing `webhooks.toml` and `signing-token`.
+The template uses JSON string quoting, which is valid for this TOML token value.
+The ConfigMap and ExternalSecret contain no credentials.
+[ESO configuration templates](https://external-secrets.io/latest/guides/templating/).
+
+Add this fragment to the gateway Deployment's `spec.template.spec`, merging it
+with its existing containers and volumes. It mounts the generated configuration
+at `/run/secrets/gitlab-webhooks/webhooks.toml` for the command below:
+
+```yaml
+securityContext:
+  fsGroup: 65532
+containers:
+  - name: gateway
+    volumeMounts:
+      - name: gitlab-webhooks
+        mountPath: /run/secrets/gitlab-webhooks
+        readOnly: true
+volumes:
+  - name: gitlab-webhooks
+    secret:
+      secretName: gitlab-webhooks
+      defaultMode: 0440
+      items:
+        - key: webhooks.toml
+          path: webhooks.toml
+```
+
+Use the gateway container's existing name and security group if they differ.
+The volume is required: pods wait for the Secret before starting. When using
+`KafkaGrpcGateway`, reference the same ESO-generated token in the endpoint's
+`secretRef: {name: gitlab-webhooks, key: signing-token}` instead; the Krabka
+operator renders its own gateway configuration.
+
+ESO refreshes the Secret hourly. The gateway reads webhook configuration at
+startup, so wait for a successful ESO refresh and roll the gateway pods when
+rotating the GitLab signing token. Coordinate the rollout with GitLab's token
+change; refreshing the mounted file alone does not reload the verifier.
+[ESO refresh behavior](https://external-secrets.io/latest/api/externalsecret/).
 
 ## Run the gateway replicas
 
@@ -47,7 +109,7 @@ krabka-gateway \
   --listen-addr 0.0.0.0:9500 \
   --client-id gitlab-gateway-0 \
   --advertised-addr gitlab-gateway-0.internal:9500 \
-  --webhooks-config /run/secrets/gitlab-webhooks.toml \
+  --webhooks-config /run/secrets/gitlab-webhooks/webhooks.toml \
   --dedup-topic __gitlab_gateway_dedup \
   --dedup-partitions 8 \
   --dedup-window 24h \
@@ -56,7 +118,7 @@ krabka-gateway \
   --membership-topic __gitlab_gateway_membership \
   --internal-topic-replication-factor 3 \
   --internal-topic-allow-replication-fallback false \
-  --forward-max-body 32MiB \
+  --forward-max-body 128MiB \
   --client-frame-max 32MiB \
   --tls-cert /run/secrets/gateway-cert.pem \
   --tls-key /run/secrets/gateway-key.pem \
@@ -85,8 +147,8 @@ broker-facing TLS/authentication separately using the gateway's broker security
 flags for the deployment.
 
 GitLab.com permits 25 MB payloads and times out after 10 seconds. The endpoint
-accepts `25MB` (25,000,000 bytes). Internal base64 value encoding expands that to
-about 33.3 MB, so `--forward-max-body 32MiB` leaves room for the small MR key and
+accepts `25MB` (25,000,000 bytes). Internal JSON byte arrays can expand that to
+100 MB, so `--forward-max-body 128MiB` leaves room for the small MR key and
 allowlisted headers. Align proxy limits, client frames, broker request and record
 limits, topic limits, and consumer fetch limits to accept the raw payload plus
 protocol overhead. Larger extra headers require additional forwarding headroom.
