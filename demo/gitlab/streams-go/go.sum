@@ -30,8 +30,8 @@ github.com/klauspost/compress v1.19.0 h1:sXLILfc9jV2QYWkzFOPWStmcUVH2RHEB1JCdY2o
 github.com/klauspost/compress v1.19.0/go.mod h1:cwPg85FWrGar70rWktvGQj8/hthj3wpl0PGDogxkrSQ=
 github.com/klauspost/cpuid/v2 v2.4.0 h1:S6Hrbc7+ywsr0r+RLapfGBHfyefhCTwEh3A0tV913Dw=
 github.com/klauspost/cpuid/v2 v2.4.0/go.mod h1:19jmZ9mjzoF//ddRSUsv0zfBTJWh3QJh9FNxZTMrGxU=
-github.com/krabka-io/krabka-streams-go v0.1.1-0.20261003040710-8baba1c1a19b h1:gx8LPVoPmANGjkwTTSffpMo0q3tjRzbloE5wV1/+xU8=
-github.com/krabka-io/krabka-streams-go v0.1.1-0.20261003040710-8baba1c1a19b/go.mod h1:u4DgLiug6MOiqJJgAZuuqb9q8VbdMd3rb/yNif7LfWk=
+github.com/krabka-io/krabka-streams-go v0.2.0 h1:yNEHIpXLbrpfR4ehM5Ccp3dhuXUFjTORWeQjf6bqdA8=
+github.com/krabka-io/krabka-streams-go v0.2.0/go.mod h1:u4DgLiug6MOiqJJgAZuuqb9q8VbdMd3rb/yNif7LfWk=
 github.com/mattn/go-colorable v0.1.13 h1:fFA4WZxdEF4tXPZVKMLwD8oUnCTTo08duU7wxecdEvA=
 github.com/mattn/go-colorable v0.1.13/go.mod h1:7S9/ev0klgBDR4GtXTXX8a3vIGJpMovkB8vQcUbaXHg=
 github.com/mattn/go-isatty v0.0.20 h1:xfD0iDuEKnDkl03q4limB+vH+GxLEtL/jb4xVJSWWEY=

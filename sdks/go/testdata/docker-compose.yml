@@ -8,7 +8,7 @@
 
 # The broker image is a published delivery image of krabka-broker, pinned by
 # digest. Set KRABKA_BROKER_IMAGE to use a different image.
-x-broker-image: &broker-image ${KRABKA_BROKER_IMAGE:-ghcr.io/krabka-io/krabka-broker@sha256:0fe7f9f2a2e4ee40126608149498113dc77cc29912831468a050c3088ee5df52}
+x-broker-image: &broker-image ${KRABKA_BROKER_IMAGE:-ghcr.io/krabka-io/krabka-broker@sha256:54ae711e5a7c8bdb03414402722f5c41dd50980ab315ab84d0803cca775fb463}
 
 services:
   # One-shot: format the KRaft storage of the broker before it starts. With
