@@ -1,9 +1,11 @@
-# GitLab.com merge request ingestion
+# GitLab.com webhook ingestion
 
 This setup sends signed GitLab.com merge request deliveries through gateway
 replicas into `gitlab.merge-requests`. The application team owns its production
 consumer. [consumer-go](consumer-go) provides a runnable Go example using
 [krabka-streams-go](https://github.com/krabka-io/krabka-streams-go).
+For every enabled GitLab event, use the
+[franz-go JSON printer](#all-gitlab-events-with-franz-go).
 
 ## Configure the hook
 
@@ -220,6 +222,90 @@ durable, duplicate-safe application effect before using this as a service.
 The example intentionally stops on an invalid record rather than silently
 skipping it; the application team owns retries, dead-letter handling, broker
 TLS/authentication, and reconciliation.
+
+## All GitLab events with franz-go
+
+[consumer-franz-go](consumer-franz-go) consumes `gitlab.events` directly with
+franz-go and prints every record's complete JSON payload, indented for reading.
+It applies no event-type filter or MR schema and preserves numeric IDs without
+converting them to floating point. The MR template and streams example above
+remain available; this section selects an alternate receiver configuration.
+
+Add a GitLab hook at
+`https://hooks.example.com/v1/webhooks/gitlab-events`, enable every event type
+offered for that project or group hook, and retain the default JSON payload and
+SSL verification. The consumer does not enable events in GitLab. Store this
+hook's generated signing token in the same external-secret backend entry used
+above. Provision `gitlab.events` with the same replication, minimum ISR,
+retention, and size policies; grant `webhook:gitlab-events` write access when
+ACLs are enabled, and expose only the new named webhook path through the public
+HTTPS edge.
+[Available project and group hook events](https://docs.gitlab.com/user/project/integrations/webhook_events/).
+
+Use [webhooks-all-events.toml.example](webhooks-all-events.toml.example), which
+omits `key_source` so push, tag, issue, note, and other payloads need no MR fields.
+Signed delivery IDs still provide transactional deduplication, and the same
+signed and allowlisted metadata are preserved. From the repository root,
+replace the existing ConfigMap's template and request an ESO refresh:
+
+```sh
+kubectl -n gitlab create configmap gitlab-webhooks-template \
+  --from-file=webhooks.toml=demo/gitlab/webhooks-all-events.toml.example \
+  --dry-run=client -o yaml | kubectl apply -f -
+kubectl -n gitlab apply -f demo/gitlab/external-secret.yaml
+kubectl -n gitlab annotate externalsecret gitlab-webhooks \
+  force-sync="$(date +%s)" --overwrite
+kubectl -n gitlab wait --for=condition=Ready externalsecret/gitlab-webhooks \
+  --timeout=120s
+kubectl -n gitlab get externalsecret gitlab-webhooks \
+  -o jsonpath='{.status.refreshTime}{"\n"}'
+```
+
+Before rolling pods, confirm `refreshTime` is newer than the template update;
+`Ready` alone can describe a previous successful synchronization. Repeat this
+check until it succeeds: it verifies the generated endpoint without printing
+the Secret's contents.
+
+```sh
+kubectl -n gitlab get secret gitlab-webhooks \
+  -o jsonpath='{.data.webhooks\.toml}' \
+  | base64 --decode | rg --quiet '^name = "gitlab-events"$'
+```
+
+Then roll the gateway Deployment, replacing `gitlab-gateway` with its actual
+name:
+
+```sh
+kubectl -n gitlab rollout restart deployment/gitlab-gateway
+kubectl -n gitlab rollout status deployment/gitlab-gateway --timeout=120s
+```
+
+The gateway startup command and Secret volume stay the same. Choosing this
+alternate template replaces the mounted MR endpoint with `gitlab-events`.
+[ESO manual refresh and sync status](https://external-secrets.io/latest/introduction/faq/#can-i-manually-trigger-a-secret-refresh).
+
+With Go 1.26.5 or newer, run from this directory:
+
+```sh
+cd consumer-franz-go
+go run . -brokers 127.0.0.1:9092 \
+  -topic gitlab.events -group gitlab-json-example
+```
+
+The example uses read-committed isolation and manual offset commits after
+successful output. Instances in the same group share partitions; a different
+group receives every event independently. Stdout is at least once: a restart
+or uncertain commit can repeat printed records. Invalid JSON, output errors,
+and commit failures halt the example instead of skipping data. The application
+team owns production effects, retries, broker TLS/authentication, and recovery.
+
+To check this example locally, run from the repository root:
+
+```sh
+cd demo/gitlab/consumer-franz-go
+go test ./...
+go vet ./...
+```
 
 ## Local verification
 
