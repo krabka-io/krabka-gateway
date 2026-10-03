@@ -31,7 +31,7 @@ When in doubt, match Kafka. If Kafka's behavior is undocumented or version-depen
 The four `gen/` trees are checked in, and CI regenerates them and compares byte for byte. So when you change the `.proto`, run `buf generate` in the same commit:
 
 ```bash
-go run github.com/bufbuild/buf/cmd/buf@v1.54.0 generate
+go run github.com/bufbuild/buf/cmd/buf@v1.73.0 generate
 ```
 
 Never hand-edit a file under `sdks/*/gen`.

@@ -1,8 +1,8 @@
 axl_archive_dep(
     name = "krabka_tooling",
-    urls = ["https://github.com/krabka-io/tooling/archive/1ed310b25955218d4ff37b6e9709e2833a6af96a.tar.gz"],
-    integrity = "sha512-9Qh8Yn6oyONw9wXRVvhuD81aC1fMaBuTBBvT+bbiuMjlxtxbEbN+V1+a8qg3kAkK9igaOfsristOpJOpIR8QrQ==",
-    strip_prefix = "tooling-1ed310b25955218d4ff37b6e9709e2833a6af96a",
+    urls = ["https://github.com/krabka-io/tooling/archive/e49362a03c47f61bfef113f98c7fdd5d80b54cad.tar.gz"],
+    integrity = "sha512-rQjMz/gnUhTFSG+qC8ENt0AeJtpfJX1d9wuHBpf5lZIQJGMFAriY/wXZKFaBC8AyVCMnhkRsSwG7uGsjwUSLvQ==",
+    strip_prefix = "tooling-e49362a03c47f61bfef113f98c7fdd5d80b54cad",
     auto_use_tasks = True,
     dev = True,
 )

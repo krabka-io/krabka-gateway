@@ -283,7 +283,7 @@ Krabka is built on `tokio`, which `[workspace.dependencies]` pins.
 
 - Inherit the shared package metadata from the workspace with `.workspace = true`: `edition`, `rust-version`, `license`, and `authors`. Inherit the lint policy with `[lints] workspace = true`.
 - Krabka **does** use a `[workspace.dependencies]` table. Declare a shared dependency once there, with its version and features, and reference it from a crate with `<dep>.workspace = true`. This keeps versions consistent across 50-plus crates, and it holds the cross-crate version pins.
-- Several pins are **lock-stepped** and carry an explanatory comment in the workspace `Cargo.toml`. These are the `datafusion` git revision with `arrow` / `parquet` / `object_store`, and `polars` with `polars-arrow`. Do not bump one of these alone. Read the comment and move the whole set together. Renovate is configured to hold them.
+- Keep `arrow` compatible with `datafusion` and `krabka-client-streams`: their Arrow values cross crate boundaries, so they must resolve to the same major version.
 - Keep dependencies minimal and justified. Every new third-party crate passes through the `cargo deny` gate in `deny.toml` and through the security-audit CI workflow. Check a sibling crate or the lockfile before you introduce a new version of something already in the tree.
 
 ## Tests

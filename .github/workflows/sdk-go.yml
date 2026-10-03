@@ -30,13 +30,13 @@ jobs:
           cache-dependency-path: sdks/go/go.sum
       - uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: '1.97.1'
+          toolchain: '1.99.0'
       - uses: Swatinem/rust-cache@v2
         with:
           key: sdk-go
       - name: Generate Go gateway stubs
         run: |
-          go run github.com/bufbuild/buf/cmd/buf@v1.54.0 generate
+          go run github.com/bufbuild/buf/cmd/buf@v1.73.0 generate
           git diff --exit-code -- buf.gen.yaml sdks/go/gen
       # Resolves the compose harness and checks its images and health checks.
       # It starts no container. The `compose-smoke` job below starts them.
@@ -79,7 +79,7 @@ jobs:
         with:
           go-version-file: sdks/go/go.mod
           cache-dependency-path: sdks/go/go.sum
-      - uses: aspect-build/setup-aspect@2306377a61c45954ab2df7c7311698b109364352 # v2026.26.9
+      - uses: aspect-build/setup-aspect@ebca96eb49ef58c00d4226de8bd3a0813507dd87 # v2026.38.3
         with:
           aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
           bazelisk-cache: true

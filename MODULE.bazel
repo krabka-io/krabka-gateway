@@ -14,7 +14,7 @@ module(
 )
 
 bazel_dep(name = "platforms", version = "1.1.0")
-bazel_dep(name = "rules_rs", version = "0.0.110")
+bazel_dep(name = "rules_rs", version = "0.1.0")
 bazel_dep(name = "rules_rs_mutants", version = "0.0.1")
 
 # rules_rs_mutants is not published to the Bazel Central Registry, so the
@@ -25,7 +25,7 @@ git_override(
     # `//mutants:config`, without which the sweep enumerates from a synthetic
     # workspace where this repo's `.cargo/mutants.toml` is not in scope -- so
     # the exclusions written there did not exclude.
-    commit = "80120ba8d223abf1467f611e46c2969789e704fb",
+    commit = "63bb99ca9a7cb81eab1728bc5d2c9985f23c8560",
     remote = "https://github.com/robot-head/rules_rs_mutants",
 )
 
@@ -36,7 +36,7 @@ git_override(
 # link action printed "the gold linker is deprecated and has known bugs with
 # Rust". Pinning the toolchain links with lld instead, and makes a local build
 # and a CI build the same build.
-bazel_dep(name = "llvm", version = "0.8.18")
+bazel_dep(name = "llvm", version = "0.8.24")
 
 register_toolchains("@llvm//toolchain:all")
 
@@ -47,7 +47,7 @@ register_toolchains("@llvm//toolchain:all")
 # gateway binary on that base, loads the image into a local daemon and pushes
 # it to the registry. krabka-broker uses the same arrangement.
 # ---------------------------------------------------------------------------
-bazel_dep(name = "rules_img", version = "0.3.20")
+bazel_dep(name = "rules_img", version = "0.3.22")
 bazel_dep(name = "rules_apko", version = "1.5.56")
 
 # `sh_test`, for the checks on the image layers.
@@ -64,22 +64,12 @@ use_repo(apko, "apko_toolchains", "gateway_base_lock")
 register_toolchains("@apko_toolchains//:all")
 
 # Format and lint. See //tools/lint.
-bazel_dep(name = "aspect_rules_lint", version = "2.7.2")
+bazel_dep(name = "aspect_rules_lint", version = "2.9.1")
 
 # Supplies a clippy aspect shaped the way `aspect lint` expects -- it writes the
 # `rules_lint_machine` output group, which the aspect from @rules_rust does not.
-bazel_dep(name = "aspect_rules_lint_rust", version = "0.0.2")
-
-# See the patch header: that module registers `@default_rust_toolchains//:all`,
-# a package rules_rs 0.0.110 does not create.
-single_version_override(
-    module_name = "aspect_rules_lint_rust",
-    patch_strip = 1,
-    patches = ["//bazel/patches:aspect-rules-lint-rust-toolchain-pattern.patch"],
-    version = "0.0.2",
-)
-
-bazel_dep(name = "buildifier_prebuilt", version = "8.5.1.3")
+bazel_dep(name = "aspect_rules_lint_rust", version = "0.0.3")
+bazel_dep(name = "buildifier_prebuilt", version = "10.1.0")
 
 # `protoc` for the gateway's build script, which generates the Connect-RPC
 # stubs. The build supplies it, so the build script does not locate a vendored
@@ -93,7 +83,7 @@ bazel_dep(name = "toolchains_protoc", version = "0.6.1")
 bazel_dep(name = "rules_proto", version = "7.1.0")
 
 protoc = use_extension("@toolchains_protoc//protoc:extensions.bzl", "protoc")
-protoc.toolchain(version = "v27.3")
+protoc.toolchain(version = "v33.0")
 use_repo(protoc, "toolchains_protoc_hub")
 
 register_toolchains("@toolchains_protoc_hub//:all")
@@ -108,11 +98,10 @@ use_repo(rules_rust, "rules_rust")
 # ---------------------------------------------------------------------------
 toolchains = use_extension("@rules_rs//rs/toolchains:module_extension.bzl", "toolchains")
 
-# Named rather than left as `default_rust_toolchains`, which
-# aspect_rules_lint_rust also claims: rules_rs refuses two configurations under
-# one repo name, and that module wants a different channel than this repository.
+# aspect_rules_lint_rust also imports this default toolchain repository.
+# Configure it here so builds and Clippy use the same pinned compiler.
 toolchains.toolchain(
-    name = "krabka_rust_toolchains",
+    name = "default_rust_toolchains",
     edition = "2024",
     # rustfmt.toml sets nightly-gated options. Stable rustfmt does not fail on
     # them, it warns and silently skips them -- so a stable formatter would
@@ -120,11 +109,11 @@ toolchains.toolchain(
     rustfmt_version = "nightly/2026-08-14",
     # Matches rust-toolchain.toml. Letting these drift is precisely the split
     # that "one dependency source of truth" exists to avoid.
-    version = "1.98.1",
+    version = "1.99.0",
 )
-use_repo(toolchains, "default_rust_toolchains", "krabka_rust_toolchains")
+use_repo(toolchains, "default_rust_toolchains")
 
-register_toolchains("@krabka_rust_toolchains//...")
+register_toolchains("@default_rust_toolchains//...")
 
 # ---------------------------------------------------------------------------
 # Native `-sys` crates, built by Bazel rather than by their build scripts.
@@ -134,8 +123,8 @@ register_toolchains("@krabka_rust_toolchains//...")
 # build script: the host's compiler, flags and headers, none of which the
 # hermetic toolchain governs.
 # ---------------------------------------------------------------------------
-bazel_dep(name = "aws-lc", version = "5.1.0.bcr.2")
-bazel_dep(name = "zstd", version = "1.5.7.bcr.1")
+bazel_dep(name = "aws-lc", version = "5.1.0.bcr.3")
+bazel_dep(name = "zstd", version = "1.5.7.bcr.2")
 
 # aws-lc-sys' bindings are generated, and rules_rs prefers the pregenerated set
 # to running bindgen; the toolchain is still required for the paths that do.

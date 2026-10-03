@@ -49,7 +49,7 @@ The Rust server compiles it in `build.rs`. The other four SDKs read the
 checked-in stubs under `sdks/<lang>/gen`, produced by `buf` from the same file:
 
 ```bash
-go run github.com/bufbuild/buf/cmd/buf@v1.54.0 generate
+go run github.com/bufbuild/buf/cmd/buf@v1.73.0 generate
 git diff --exit-code -- sdks
 ```
 

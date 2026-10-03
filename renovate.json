@@ -20,12 +20,16 @@
   "customManagers": [
     {
       "customType": "regex",
-      "description": "The rules_rs toolchain version in MODULE.bazel. Named and sourced exactly as the built-in rust-toolchain manager names rust-toolchain.toml, so the two group.",
+      "description": "Keep the Rust compiler, workspace MSRV, and SDK CI toolchains in the same update.",
       "managerFilePatterns": [
-        "/(^|/)MODULE\\.bazel$/"
+        "/(^|/)MODULE\\.bazel$/",
+        "/^Cargo\\.toml$/",
+        "/^\\.github/workflows/sdk-[^/]+\\.yml$/"
       ],
       "matchStrings": [
-        "toolchains\\.toolchain\\([^)]*?version = \"(?<currentValue>\\d+\\.\\d+\\.\\d+)\""
+        "toolchains\\.toolchain\\([^)]*?version = \"(?<currentValue>\\d+\\.\\d+\\.\\d+)\"",
+        "rust-version = \"(?<currentValue>\\d+\\.\\d+\\.\\d+)\"",
+        "toolchain: '(?<currentValue>\\d+\\.\\d+\\.\\d+)'"
       ],
       "depNameTemplate": "rust",
       "datasourceTemplate": "rust-version"
@@ -43,17 +47,7 @@
       "enabled": false
     },
     {
-      "description": "`single_version_override` applies //bazel/patches/aspect-rules-lint-rust-toolchain-pattern.patch. A bump that moves the patched lines fails to apply, and a patch failure breaks module resolution before a single target is analysed -- so this gets a pull request, but lands by hand with the patch re-checked.",
-      "matchManagers": [
-        "bazel-module"
-      ],
-      "matchPackageNames": [
-        "aspect_rules_lint_rust"
-      ],
-      "automerge": false
-    },
-    {
-      "description": "MODULE.bazel and rust-toolchain.toml carry one decision in two files. They drifted apart once already -- Bazel building with 1.97.0 while Cargo used 1.97.1 -- which is the exact split the one-dependency-source arrangement exists to prevent. Grouped so they can only move together.",
+      "description": "Update Bazel, rust-toolchain.toml, the workspace MSRV, and SDK CI together.",
       "matchDepNames": [
         "rust"
       ],

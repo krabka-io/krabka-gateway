@@ -35,6 +35,6 @@ mod tests {
     #[test]
     fn generated_gateway_messages_are_visible() {
         let request = crate::pb::SendRequest::default();
-        assert!(request.records.is_empty());
+        assert2::assert!(request.records == Vec::<crate::pb::Record>::new());
     }
 }
