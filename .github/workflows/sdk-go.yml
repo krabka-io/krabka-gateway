@@ -61,12 +61,12 @@ jobs:
 
       - uses: actions/setup-go@v7.0.0
         with:
-          go-version-file: demo/gitlab/consumer-go/go.mod
+          go-version-file: demo/gitlab/streams-go/go.mod
           cache-dependency-path: |
-            demo/gitlab/consumer-go/go.sum
+            demo/gitlab/streams-go/go.sum
             demo/gitlab/consumer-franz-go/go.sum
       - name: Verify GitLab MR consumer example
-        working-directory: demo/gitlab/consumer-go
+        working-directory: demo/gitlab/streams-go
         run: |
           unformatted="$(gofmt -l .)"
           if [ -n "$unformatted" ]; then

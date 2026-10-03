@@ -2,7 +2,7 @@
 
 This setup sends signed GitLab.com merge request deliveries through gateway
 replicas into `gitlab.merge-requests`. The application team owns its production
-consumer. [consumer-go](consumer-go) provides a runnable Go example using
+consumer. [streams-go](streams-go) provides a runnable Go example using
 [krabka-streams-go](https://github.com/krabka-io/krabka-streams-go).
 For every enabled GitLab event, use the
 [franz-go JSON printer](#all-gitlab-events-with-franz-go).
@@ -207,7 +207,7 @@ SIGINT/SIGTERM cancel polling and close the consumer.
 With Go 1.26.5 or newer, run from this directory:
 
 ```sh
-cd consumer-go
+cd streams-go
 go run . -brokers 127.0.0.1:9092 \
   -topic gitlab.merge-requests -group gitlab-mr-example
 ```
@@ -314,7 +314,7 @@ From the repository root:
 ```sh
 cargo test -p krabka-gateway --no-default-features --features vendored-protoc \
   --test webhook standard_webhooks_producer_path
-cd demo/gitlab/consumer-go
+cd demo/gitlab/streams-go
 go test ./...
 go vet ./...
 ```

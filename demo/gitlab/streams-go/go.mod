@@ -1,4 +1,4 @@
-module github.com/krabka-io/krabka-gateway/demo/gitlab/consumer-go
+module github.com/krabka-io/krabka-gateway/demo/gitlab/streams-go
 
 go 1.26.5
 
