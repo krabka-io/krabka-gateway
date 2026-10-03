@@ -34,13 +34,12 @@ use crate::{
     types::{GatewayRecord, RecordOutcome},
 };
 
-/// Wire form of a forwarded record. The payload uses base64 to bound JSON
-/// expansion; small keys and headers remain byte arrays.
+/// Wire form of a forwarded record. Bytes use the JSON arrays expected by
+/// `/internal/v1/forward`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ForwardRecord {
     pub topic: String,
     pub key: Option<Vec<u8>>,
-    #[serde(with = "base64_value")]
     pub value: Vec<u8>,
     pub headers: Vec<(String, Option<Vec<u8>>)>,
     pub partition: Option<i32>,
@@ -52,21 +51,6 @@ pub struct ForwardRecord {
     /// ANONYMOUS. The owner trusts the mTLS-authenticated peer gateway to relay
     /// this truthfully, as a trusted-proxy chain.
     pub principal: Option<ForwardPrincipal>,
-}
-
-mod base64_value {
-    use base64::{Engine, engine::general_purpose::STANDARD};
-    use serde::{Deserialize, Deserializer, Serializer};
-
-    pub fn serialize<S: Serializer>(value: &[u8], serializer: S) -> Result<S::Ok, S::Error> {
-        serializer.serialize_str(&STANDARD.encode(value))
-    }
-
-    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<u8>, D::Error> {
-        STANDARD
-            .decode(String::deserialize(deserializer)?)
-            .map_err(serde::de::Error::custom)
-    }
 }
 
 /// Wire form of a resolved caller [`Principal`] carried on a forward.
@@ -456,7 +440,7 @@ mod tests {
     const N: u32 = 4;
 
     #[test]
-    fn forwarded_payload_is_base64_and_round_trips() {
+    fn forwarded_payload_is_a_byte_array_and_round_trips() {
         let record = ForwardRecord {
             topic: "events".into(),
             key: None,
@@ -468,15 +452,17 @@ mod tests {
             principal: None,
         };
         let mut json = serde_json::to_value(&record).unwrap();
-        assert2::assert!(json["value"] == "AP8R");
+        assert2::assert!(json["value"] == serde_json::json!([0, 255, 17]));
         assert2::assert!(
             serde_json::from_value::<ForwardRecord>(json.clone())
                 .unwrap()
                 .value
                 == record.value
         );
-        json["value"] = serde_json::Value::String("invalid!".into());
-        assert2::assert!(serde_json::from_value::<ForwardRecord>(json).is_err());
+        for invalid in [serde_json::json!("AP8R"), serde_json::json!([0, 256])] {
+            json["value"] = invalid;
+            assert2::assert!(serde_json::from_value::<ForwardRecord>(json.clone()).is_err());
+        }
     }
 
     #[tokio::test]
@@ -621,7 +607,7 @@ mod tests {
         state_mut.config = Arc::new(config);
 
         let mut record = forward_record("orders");
-        record.value = vec![255; 2_000_000];
+        record.value = vec![255; 600_000];
         let body = serde_json::to_vec(&record).unwrap();
         assert2::assert!(body.len() > mebibytes(2).bytes_usize());
         assert2::assert!(body.len() < mebibytes(4).bytes_usize());
