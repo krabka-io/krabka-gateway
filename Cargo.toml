@@ -57,6 +57,7 @@ hyper-util = "0.1"
 jsonpath-rust = "1.0"
 jsonschema = { version = "0.58", default-features = false }
 mutants = "0.0.4"
+octocrab = { version = "0.54.2", default-features = false, features = ["jwt-aws-lc-rs"] }
 pbjson = "0.9"
 prometheus-client = "0.25"
 prost = "0.14"
