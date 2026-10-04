@@ -29,6 +29,14 @@ crate_binary(
     lib = ":gateway",
 )
 
+crate_binary(
+    name = "github_firehose",
+    compile_data = ["//:demo/github-firehose/webhooks.toml"],
+    crate_root = "examples/github_firehose.rs",
+    lib = ":gateway",
+    deps = ["@crates//:octocrab"],
+)
+
 crate_tests(
     data = [":test_scripts"],
     lib = "gateway",

@@ -21,6 +21,10 @@ workspace = true
 name = "krabka-gateway"
 path = "src/bin/gateway.rs"
 
+[[example]]
+name = "github_firehose"
+required-features = ["arrow"]
+
 [dependencies]
 assert2 = { workspace = true }
 krabka-authz = { workspace = true }
@@ -93,6 +97,8 @@ connectrpc-axum-build = { workspace = true }
 protoc-bin-vendored = { workspace = true, optional = true }
 
 [dev-dependencies]
+# Typed GitHub webhook models for the firehose example.
+octocrab.workspace = true
 krabka-broker = { workspace = true, features = ["test-helpers"] }
 temp-env = { workspace = true }
 # Raw Fetch + v2 RecordBatch decode in tests/outbound.rs to read the DLQ
