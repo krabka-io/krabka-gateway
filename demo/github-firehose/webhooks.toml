@@ -1,0 +1,13 @@
+# Replace the demo secret before exposing this endpoint to GitHub.
+[[endpoints]]
+name = "github"
+target_topic = "github-webhooks"
+secret = "github-firehose-demo-secret"
+signature_header = "X-Hub-Signature-256"
+signature_encoding = "hex"
+signature_prefix = "sha256="
+idempotency_source = "header:X-GitHub-Delivery"
+# GitHub's event name lives in the header, not the JSON body. Preserve it as
+# the record key so the Streams topology can dispatch every payload shape.
+key_source = "header:X-GitHub-Event"
+max_body = "25MiB"

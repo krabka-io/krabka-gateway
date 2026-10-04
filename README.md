@@ -117,6 +117,15 @@ CloudEvent into the gateway and waits for both egress shapes to arrive at a
 local capture server. The in-process regression for the same paths is
 `cargo test -p krabka-gateway --test cloudevents_roundtrip`.
 
+## GitHub webhook firehose demo
+
+[`demo/github-firehose`](demo/github-firehose) receives signed GitHub webhooks
+and processes them with `krabka-streams-rs`. The runnable `github_firehose`
+example parses event bodies with Octocrab, matches every GitHub webhook event
+type, preserves complete payloads, and forwards unsupported events or schema
+errors. Run its broker-free topology checks with
+`cargo test -p krabka-gateway --example github_firehose`.
+
 ## Container image
 
 The gateway image is `ghcr.io/krabka-io/krabka-gateway`. Bazel builds it in
