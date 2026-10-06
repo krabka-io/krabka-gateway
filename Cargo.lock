@@ -2851,7 +2851,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -4176,7 +4176,7 @@ dependencies = [
 [[package]]
 name = "krabka-client-admin"
 version = "0.5.0"
-source = "git+https://github.com/krabka-io/krabka-client-rs?rev=658b0dab64e0e5e8a9b1b13cde24995cde5af219#658b0dab64e0e5e8a9b1b13cde24995cde5af219"
+source = "git+https://github.com/krabka-io/krabka-client-rs?rev=f37fe4a3be08f15b6ee8809144228bb052b163b4#f37fe4a3be08f15b6ee8809144228bb052b163b4"
 dependencies = [
  "assert2",
  "async-trait",
@@ -4197,7 +4197,7 @@ dependencies = [
 [[package]]
 name = "krabka-client-consumer"
 version = "0.5.0"
-source = "git+https://github.com/krabka-io/krabka-client-rs?rev=658b0dab64e0e5e8a9b1b13cde24995cde5af219#658b0dab64e0e5e8a9b1b13cde24995cde5af219"
+source = "git+https://github.com/krabka-io/krabka-client-rs?rev=f37fe4a3be08f15b6ee8809144228bb052b163b4#f37fe4a3be08f15b6ee8809144228bb052b163b4"
 dependencies = [
  "assert2",
  "async-trait",
@@ -4219,7 +4219,7 @@ dependencies = [
 [[package]]
 name = "krabka-client-core"
 version = "0.5.0"
-source = "git+https://github.com/krabka-io/krabka-client-rs?rev=658b0dab64e0e5e8a9b1b13cde24995cde5af219#658b0dab64e0e5e8a9b1b13cde24995cde5af219"
+source = "git+https://github.com/krabka-io/krabka-client-rs?rev=f37fe4a3be08f15b6ee8809144228bb052b163b4#f37fe4a3be08f15b6ee8809144228bb052b163b4"
 dependencies = [
  "async-trait",
  "base64 0.23.1",
@@ -4257,7 +4257,7 @@ dependencies = [
 [[package]]
 name = "krabka-client-producer"
 version = "0.5.0"
-source = "git+https://github.com/krabka-io/krabka-client-rs?rev=658b0dab64e0e5e8a9b1b13cde24995cde5af219#658b0dab64e0e5e8a9b1b13cde24995cde5af219"
+source = "git+https://github.com/krabka-io/krabka-client-rs?rev=f37fe4a3be08f15b6ee8809144228bb052b163b4#f37fe4a3be08f15b6ee8809144228bb052b163b4"
 dependencies = [
  "assert2",
  "async-trait",
@@ -4658,7 +4658,7 @@ dependencies = [
 [[package]]
 name = "krabka-schema-serde"
 version = "0.4.1"
-source = "git+https://github.com/krabka-io/krabka-schema-registry?rev=0ecb43620a40717e5cba2a248744905c5fadf869#0ecb43620a40717e5cba2a248744905c5fadf869"
+source = "git+https://github.com/krabka-io/krabka-schema-registry?rev=ce5f1bdd913a1f8056b940d0ceaa51155b6ca52b#ce5f1bdd913a1f8056b940d0ceaa51155b6ca52b"
 dependencies = [
  "apache-avro",
  "assert2",
@@ -5515,7 +5515,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -6719,7 +6719,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "22505a5c94da8e3b7c2996394d1c933236c4d743e81a410bcca4e6989fc066a4"
 dependencies = [
  "bytes",
- "heck 0.5.0",
+ "heck 0.4.1",
  "itertools 0.12.1",
  "log",
  "multimap",
@@ -6739,7 +6739,7 @@ version = "0.14.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "03da047801ff44bb6a4d407d4860c05fd70bb81714e6b2f3812603d5b145b042"
 dependencies = [
- "heck 0.5.0",
+ "heck 0.4.1",
  "itertools 0.14.0",
  "log",
  "multimap",
@@ -7011,7 +7011,7 @@ dependencies = [
  "once_cell",
  "socket2",
  "tracing",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -7513,7 +7513,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.12.1",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -7572,7 +7572,7 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -8089,7 +8089,7 @@ version = "0.8.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c1c97747dbf44bb1ca44a561ece23508e99cb592e862f22222dcf42f51d1e451"
 dependencies = [
- "heck 0.5.0",
+ "heck 0.4.1",
  "proc-macro2",
  "quote",
  "syn 2.0.119",
@@ -8573,7 +8573,7 @@ dependencies = [
  "getrandom 0.4.3",
  "once_cell",
  "rustix 1.1.5",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -8583,7 +8583,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "230a1b821ccbd75b185820a1f1ff7b14d21da1e442e22c0863ea5f08771a8874"
 dependencies = [
  "rustix 1.1.5",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -9245,7 +9245,7 @@ version = "2.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "86a801b3cea342a06d468c8710662aa29e5e05e4f5c0d62f00bbb7f2ad7941c2"
 dependencies = [
- "rand 0.10.3",
+ "rand 0.9.5",
 ]
 
 [[package]]
@@ -9632,7 +9632,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -10184,7 +10184,7 @@ source = "git+https://github.com/krabka-io/krabka-cli?rev=b39dc88d0da3792db02ad6
 [[patch.unused]]
 name = "krabka-client-coordination"
 version = "0.5.0"
-source = "git+https://github.com/krabka-io/krabka-client-rs?rev=658b0dab64e0e5e8a9b1b13cde24995cde5af219#658b0dab64e0e5e8a9b1b13cde24995cde5af219"
+source = "git+https://github.com/krabka-io/krabka-client-rs?rev=f37fe4a3be08f15b6ee8809144228bb052b163b4#f37fe4a3be08f15b6ee8809144228bb052b163b4"
 
 [[patch.unused]]
 name = "krabka-connect"
@@ -10314,7 +10314,7 @@ source = "git+https://github.com/krabka-io/krabka-broker?rev=a23b3c0f930d034d8c9
 [[patch.unused]]
 name = "krabka-schema-registry"
 version = "0.4.1"
-source = "git+https://github.com/krabka-io/krabka-schema-registry?rev=0ecb43620a40717e5cba2a248744905c5fadf869#0ecb43620a40717e5cba2a248744905c5fadf869"
+source = "git+https://github.com/krabka-io/krabka-schema-registry?rev=ce5f1bdd913a1f8056b940d0ceaa51155b6ca52b#ce5f1bdd913a1f8056b940d0ceaa51155b6ca52b"
 
 [[patch.unused]]
 name = "krabka-traceql"
