@@ -388,6 +388,14 @@ impl LiveSubstrate {
                 .await
                 .map_err(HarnessError::BrokerStart)?;
         broker.wait_until_group_coordinator_ready().await;
+        // The first share fetch creates `__share_group_state` and waits for
+        // this broker's share coordinator to load it. On a slow host that
+        // cold start alone outlasts the one-second wait that each SDK gives an
+        // acquisition, so the first queue vector would acquire nothing. Warm
+        // the share coordinator here, as the group coordinator is warmed above.
+        if !queue_groups.is_empty() {
+            broker.wait_until_share_coordinator_ready().await;
+        }
         let bootstrap = broker.listen_addr().to_string();
         create_topics(&bootstrap, topic_names).await?;
         set_share_groups_earliest(&bootstrap, queue_groups).await?;
