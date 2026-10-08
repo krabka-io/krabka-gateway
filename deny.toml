@@ -18,7 +18,7 @@ ignore = [
     "RUSTSEC-2026-0194",
     "RUSTSEC-2026-0195",
     # RSA "Marvin" timing side-channel. Pulled in transitively by `picky`
-    # (a hard dependency of the vendored `sspi` Kerberos stack in
+    # (a hard dependency of the `krabka-sspi` Kerberos stack in
     # `krabka-security`). The GSSAPI path is auth-only over AES keytab keys
     # and performs no RSA private-key operations (no PKINIT), so the
     # network-observable timing leak does not apply. The advisory has no
@@ -51,7 +51,7 @@ allow = [
 ]
 exceptions = [
     # portpicker is public-domain-equivalent (The Unlicense, OSI-approved and
-    # FSF Free/Libre). Pulled in transitively via the vendored `sspi` crate's
+    # FSF Free/Libre). Pulled in transitively via the `krabka-sspi` crate's
     # `network_client` feature, which the Kerberos path needs for KDC
     # communication.
     { allow = ["Unlicense"], crate = "portpicker" },
@@ -88,7 +88,6 @@ allow-git = [
     "https://github.com/krabka-io/krabka-rebalancer",
     "https://github.com/krabka-io/krabka-schema-registry",
     "https://github.com/krabka-io/krabka-streams-rs",
-    "https://github.com/robot-head/sspi-rs",
 ]
 
 [[licenses.clarify]]
