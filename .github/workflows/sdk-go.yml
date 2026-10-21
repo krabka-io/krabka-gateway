@@ -20,9 +20,11 @@ concurrency:
 
 jobs:
   sdk-go:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 45
     steps:
+      - name: Keep temporary files off the size-limited /tmp tmpfs
+        run: echo "TMPDIR=${RUNNER_TEMP}" >> "${GITHUB_ENV}"
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7.0.0
         with:
@@ -98,7 +100,7 @@ jobs:
   compose-smoke:
     name: compose harness smoke (Docker gate)
     if: github.event_name == 'workflow_dispatch' && inputs.docker_gate
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 90
     permissions:
       contents: read
@@ -106,6 +108,8 @@ jobs:
       # API, which needs the OIDC token. See ci.yml.
       id-token: write
     steps:
+      - name: Keep temporary files off the size-limited /tmp tmpfs
+        run: echo "TMPDIR=${RUNNER_TEMP}" >> "${GITHUB_ENV}"
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7.0.0
         with:

@@ -30,6 +30,8 @@ jobs:
             cmake-args: -DKRABKA_CPP_SANITIZERS=OFF -DKRABKA_CPP_TSAN=ON
             ctest-args: --output-on-failure -R krabka_cpp_transport_test
     steps:
+      - name: Keep temporary files off the size-limited /tmp tmpfs
+        run: echo "TMPDIR=${RUNNER_TEMP}" >> "${GITHUB_ENV}"
       - uses: actions/checkout@v7
       - name: Install C++ SDK dependencies
         run: sudo apt-get update && sudo apt-get install -y cmake g++ libnghttp2-dev libprotobuf-dev protobuf-compiler pkg-config
