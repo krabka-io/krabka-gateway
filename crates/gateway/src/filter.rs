@@ -1006,6 +1006,7 @@ impl NumericValue {
         }
     }
 
+    #[cfg(feature = "arrow")]
     fn as_integer(self) -> Option<i128> {
         match self {
             Self::Integer(value) => Some(value),
