@@ -64,6 +64,12 @@ use separate sessions. If acquisition locks expire, send acknowledgements to
 reconcile the broker's verdict or start a new session. The gateway does not use a
 local timeout to discard a lease that the broker may still consider valid.
 
+Explicit-ack subscriptions advance commits in actual delivered-offset order, so
+compacted and read-committed offset gaps do not stall progress. A partition may
+have at most 100,000 outstanding delivered records, including acknowledged records
+waiting behind an earlier unacknowledged record. Exceeding that bound terminates
+the stream with `RESOURCE_EXHAUSTED` before emitting the new batch.
+
 ## Build
 
 ```bash
