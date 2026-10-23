@@ -19,14 +19,23 @@ use crate::codec::CodecError;
 /// # Errors
 /// Returns an error when configuration is invalid, protocol encoding fails, the broker rejects the request, or transport I/O fails.
 pub fn validate(schema: &str, json: &[u8]) -> Result<(), CodecError> {
+    validate_prepared(&prepare(schema)?, json)
+}
+
+pub(super) fn prepare(schema: &str) -> Result<jsonschema::Validator, CodecError> {
     // Parse the schema string as JSON.
     let schema_value: Value = serde_json::from_str(schema)
         .map_err(|e| CodecError::Validate(format!("schema is not valid JSON: {e}")))?;
 
     // Compile the schema into a validator.
-    let validator = jsonschema::validator_for(&schema_value)
-        .map_err(|e| CodecError::Validate(format!("invalid JSON Schema: {e}")))?;
+    jsonschema::validator_for(&schema_value)
+        .map_err(|e| CodecError::Validate(format!("invalid JSON Schema: {e}")))
+}
 
+pub(super) fn validate_prepared(
+    validator: &jsonschema::Validator,
+    json: &[u8],
+) -> Result<(), CodecError> {
     // Parse the payload as JSON.
     let instance: Value = serde_json::from_slice(json)
         .map_err(|e| CodecError::Validate(format!("payload is not valid JSON: {e}")))?;

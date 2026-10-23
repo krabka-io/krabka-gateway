@@ -11,11 +11,14 @@
 //! and decode logic against a fake resolver, with no live registry. The
 //! integration test exercises the live client-to-HTTP wiring.
 
-use std::sync::Arc;
+use std::{
+    collections::{HashMap, VecDeque},
+    sync::{Arc, Mutex},
+};
 
 use bytes::Bytes;
 
-use super::client::SchemaRegistryClient;
+use super::{client::SchemaRegistryClient, format::PreparedSchema};
 use crate::codec::{CodecError, Decoded, EncodeBody, SchemaFormat, SchemaMeta};
 
 /// Schema lookups the codec needs, held apart from the concrete client so a
@@ -55,6 +58,7 @@ pub struct SchemaRegistryCodec {
     /// already serialized in that format. When `false`, the default, raw bytes
     /// pass through unchanged.
     pub frame_raw: bool,
+    prepared: Mutex<PreparedCache>,
 }
 
 impl SchemaRegistryCodec {
@@ -64,17 +68,81 @@ impl SchemaRegistryCodec {
     /// [`SchemaResolver`] trait object.
     #[must_use]
     pub fn new(client: Arc<SchemaRegistryClient>, frame_raw: bool) -> Self {
-        Self {
-            client: client as Arc<dyn SchemaResolver>,
-            frame_raw,
-        }
+        Self::with_resolver(client, frame_raw)
     }
 
     /// Construct a codec over any [`SchemaResolver`]. Tests use it with a fake
     /// resolver.
     #[must_use]
     pub fn with_resolver(client: Arc<dyn SchemaResolver>, frame_raw: bool) -> Self {
-        Self { client, frame_raw }
+        Self {
+            client,
+            frame_raw,
+            prepared: Mutex::new(PreparedCache::default()),
+        }
+    }
+
+    fn prepared(
+        &self,
+        id: i32,
+        fmt: SchemaFormat,
+        schema: &str,
+    ) -> Result<Arc<PreparedSchema>, CodecError> {
+        let slot = self
+            .prepared
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .slot(id);
+        slot.get_or_prepare(fmt, schema)
+    }
+}
+
+const PREPARED_SCHEMA_CAPACITY: usize = 1024;
+
+#[derive(Default)]
+struct PreparedCache {
+    entries: HashMap<i32, Arc<PreparedSlot>>,
+    insertion_order: VecDeque<i32>,
+}
+
+impl PreparedCache {
+    fn slot(&mut self, id: i32) -> Arc<PreparedSlot> {
+        if let Some(slot) = self.entries.get(&id) {
+            return Arc::clone(slot);
+        }
+        let slot = Arc::new(PreparedSlot::default());
+        if self.entries.len() == PREPARED_SCHEMA_CAPACITY
+            && let Some(oldest) = self.insertion_order.pop_front()
+        {
+            self.entries.remove(&oldest);
+        }
+        self.entries.insert(id, Arc::clone(&slot));
+        self.insertion_order.push_back(id);
+        slot
+    }
+}
+
+#[derive(Default)]
+struct PreparedSlot(Mutex<Option<Arc<PreparedSchema>>>);
+
+impl PreparedSlot {
+    fn get_or_prepare(
+        &self,
+        fmt: SchemaFormat,
+        schema: &str,
+    ) -> Result<Arc<PreparedSchema>, CodecError> {
+        // Compile once per id without blocking lookups for other schemas.
+        // Errors leave the slot empty so the next call can retry preparation.
+        let mut entry = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(prepared) = entry.as_ref() {
+            return Ok(Arc::clone(prepared));
+        }
+        let prepared = Arc::new(PreparedSchema::new(fmt, schema)?);
+        *entry = Some(Arc::clone(&prepared));
+        Ok(prepared)
     }
 }
 
@@ -119,7 +187,7 @@ impl crate::codec::RecordCodec for SchemaRegistryCodec {
                     })?,
                 };
 
-                let payload = super::format::serialize(fmt, &schema_str, &json)?;
+                let payload = self.prepared(id, fmt, &schema_str)?.serialize(&json)?;
                 Ok(super::wire::encode_frame(id, fmt, &payload))
             }
         }
@@ -147,7 +215,7 @@ impl crate::codec::RecordCodec for SchemaRegistryCodec {
             rest
         };
 
-        let json = super::format::deserialize(fmt, &schema_str, &payload)?;
+        let json = self.prepared(id, fmt, &schema_str)?.deserialize(&payload)?;
 
         Ok(Decoded {
             value: Bytes::from(payload),
@@ -211,6 +279,211 @@ mod tests {
             }),
             frame_raw,
         )
+    }
+
+    #[test]
+    fn prepared_schemas_are_shared_across_concurrent_misses_and_bounded() {
+        let codec = Arc::new(avro_codec(false));
+        let barrier = Arc::new(std::sync::Barrier::new(8));
+        let handles: Vec<_> = (0..8)
+            .map(|_| {
+                let codec = Arc::clone(&codec);
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    codec.prepared(5, SchemaFormat::Avro, AVRO_SCHEMA).unwrap()
+                })
+            })
+            .collect();
+        let prepared: Vec<_> = handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .collect();
+        for schema in &prepared {
+            assert2::assert!(Arc::ptr_eq(&prepared[0], schema));
+        }
+        // Errors are retried, rather than poisoning a schema id permanently.
+        assert2::assert!(
+            codec
+                .prepared(6, SchemaFormat::Json, "invalid JSON")
+                .is_err()
+        );
+        assert2::assert!(codec.prepared(6, SchemaFormat::Json, "true").is_ok());
+        for id in 7..1031 {
+            codec.prepared(id, SchemaFormat::Json, "true").unwrap();
+        }
+        assert2::assert!(codec.prepared.lock().unwrap().entries.len() == PREPARED_SCHEMA_CAPACITY);
+        let recompiled = codec.prepared(5, SchemaFormat::Avro, AVRO_SCHEMA).unwrap();
+        assert2::assert!(!Arc::ptr_eq(&prepared[0], &recompiled));
+        // An outstanding reference remains usable after its cache entry evicts.
+        let payload = prepared[0].serialize(br#"{"id":1,"name":"a"}"#).unwrap();
+        assert2::assert!(
+            prepared[0].deserialize(&payload).unwrap() == recompiled.deserialize(&payload).unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn encode_and_decode_share_the_same_preparation() {
+        for (fmt, schema, payload) in [
+            (
+                SchemaFormat::Avro,
+                AVRO_SCHEMA,
+                br#"{"id":1,"name":"a"}"#.as_slice(),
+            ),
+            (
+                SchemaFormat::Json,
+                r#"{"type":"object","required":["id"]}"#,
+                br#"{"id":1}"#.as_slice(),
+            ),
+            (
+                SchemaFormat::Protobuf,
+                r#"syntax = "proto3"; message R { int32 id = 1; }"#,
+                br#"{"id":1}"#.as_slice(),
+            ),
+        ] {
+            let codec = SchemaRegistryCodec::with_resolver(
+                Arc::new(FakeResolver {
+                    id: 5,
+                    schema: schema.into(),
+                    fmt,
+                }),
+                false,
+            );
+            let body = EncodeBody::Structured {
+                json: Bytes::copy_from_slice(payload),
+                schema: SchemaSelector {
+                    id: Some(5),
+                    subject: None,
+                    format: fmt,
+                },
+            };
+            let encoded = codec.encode("orders", body).await.unwrap();
+            let prepared = codec.prepared(5, fmt, schema).unwrap();
+            let decoded = codec.decode("orders", encoded).await.unwrap();
+            assert2::assert!(
+                serde_json::from_slice::<serde_json::Value>(&decoded.json.unwrap()).unwrap()
+                    == serde_json::from_slice::<serde_json::Value>(payload).unwrap()
+            );
+            assert2::assert!(Arc::ptr_eq(
+                &prepared,
+                &codec.prepared(5, fmt, schema).unwrap()
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn latest_schema_changes_select_a_new_prepared_entry() {
+        struct LatestResolver(std::sync::atomic::AtomicI32);
+        #[async_trait::async_trait]
+        impl SchemaResolver for LatestResolver {
+            async fn by_id(&self, id: i32) -> Result<(String, SchemaFormat), CodecError> {
+                Ok((
+                    if id == 1 {
+                        r#"{"required":["id"]}"#
+                    } else {
+                        r#"{"required":["name"]}"#
+                    }
+                    .into(),
+                    SchemaFormat::Json,
+                ))
+            }
+            async fn latest(
+                &self,
+                _subject: &str,
+            ) -> Result<(i32, String, SchemaFormat), CodecError> {
+                let id = self.0.load(std::sync::atomic::Ordering::SeqCst);
+                let (schema, fmt) = self.by_id(id).await?;
+                Ok((id, schema, fmt))
+            }
+        }
+        let resolver = Arc::new(LatestResolver(std::sync::atomic::AtomicI32::new(1)));
+        let codec = SchemaRegistryCodec::with_resolver(resolver.clone(), false);
+        let body = |json: &'static [u8], id| EncodeBody::Structured {
+            json: Bytes::from_static(json),
+            schema: SchemaSelector {
+                id,
+                subject: None,
+                format: SchemaFormat::Json,
+            },
+        };
+        let first = codec
+            .encode("orders", body(br#"{"id":1}"#, None))
+            .await
+            .unwrap();
+        assert2::assert!(super::super::wire::decode_frame(&first).unwrap().0 == 1);
+        resolver.0.store(2, std::sync::atomic::Ordering::SeqCst);
+        assert2::assert!(
+            codec
+                .encode("orders", body(br#"{"id":1}"#, None))
+                .await
+                .is_err()
+        );
+        let second = codec
+            .encode("orders", body(br#"{"name":"a"}"#, None))
+            .await
+            .unwrap();
+        assert2::assert!(super::super::wire::decode_frame(&second).unwrap().0 == 2);
+        assert2::assert!(
+            codec
+                .encode("orders", body(br#"{"id":1}"#, Some(1)))
+                .await
+                .unwrap()
+                == first
+        );
+    }
+
+    #[test]
+    #[ignore = "manual codec latency comparison"]
+    fn prepared_schema_latency_comparison() {
+        let payload = br#"{"id":1,"kind":"v0"}"#;
+        for width in [10, 100, 500] {
+            let avro = serde_json::json!({
+                "type": "record", "name": "R", "fields": [
+                    {"name": "id", "type": "long"},
+                    {"name": "kind", "type": {"type": "enum", "name": "Kind", "symbols": (0..width).map(|n| format!("v{n}")).collect::<Vec<_>>()}}
+                ]
+            }).to_string();
+            let json = serde_json::json!({"type": "object", "properties": (0..width).map(|n| (format!("optional{n}"), serde_json::json!({"type":"string"}))).collect::<serde_json::Map<_, _>>()}).to_string();
+            let protobuf = format!(
+                r#"syntax = "proto3"; message R {{ int32 id = 1; string kind = 2; {} }}"#,
+                (0..width)
+                    .map(|n| format!("string optional{n} = {};", n + 3))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            );
+            for (fmt, schema) in [
+                (SchemaFormat::Avro, avro),
+                (SchemaFormat::Json, json),
+                (SchemaFormat::Protobuf, protobuf),
+            ] {
+                let mut cache = PreparedCache::default();
+                cache.slot(1).get_or_prepare(fmt, &schema).unwrap();
+                let start = std::time::Instant::now();
+                for _ in 0..100 {
+                    let compiled = cache.slot(1).get_or_prepare(fmt, &schema).unwrap();
+                    let encoded = compiled.serialize(std::hint::black_box(payload)).unwrap();
+                    std::hint::black_box(compiled.deserialize(&encoded).unwrap());
+                }
+                let warm = start.elapsed();
+                let start = std::time::Instant::now();
+                for _ in 0..100 {
+                    let encoded = super::super::format::serialize(
+                        fmt,
+                        &schema,
+                        std::hint::black_box(payload),
+                    )
+                    .unwrap();
+                    std::hint::black_box(
+                        super::super::format::deserialize(fmt, &schema, &encoded).unwrap(),
+                    );
+                }
+                eprintln!(
+                    "format={fmt:?} width={width} payload_bytes={} records=100 warm={warm:?} reprepare={:?}",
+                    payload.len(),
+                    start.elapsed()
+                );
+            }
+        }
     }
 
     #[test]
