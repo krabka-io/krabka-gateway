@@ -19,21 +19,20 @@ use crate::codec::{CodecError, SchemaFormat};
 
 /// Encode a payload with the Confluent 5-byte magic and id framing header.
 ///
-/// For `Protobuf`, [`prepend_proto_index`] puts a single-zero message-index
-/// byte in front of the payload. That byte selects the first, top-level message
+/// For `Protobuf`, a single-zero message-index byte precedes the payload.
+/// That byte selects the first, top-level message
 /// in the schema. For `Avro` and `Json`, this function writes the payload as it
 /// is.
 #[must_use]
 pub fn encode_frame(id: i32, fmt: SchemaFormat, payload: &[u8]) -> Bytes {
-    let mut out = BytesMut::with_capacity(5 + 1 + payload.len());
+    let protobuf = fmt == SchemaFormat::Protobuf;
+    let mut out = BytesMut::with_capacity(5 + usize::from(protobuf) + payload.len());
     out.put_u8(0x00);
     out.put_i32(id);
-    if fmt == SchemaFormat::Protobuf {
-        let indexed = prepend_proto_index(payload);
-        out.put_slice(&indexed);
-    } else {
-        out.put_slice(payload);
+    if protobuf {
+        out.put_u8(0x00);
     }
+    out.put_slice(payload);
     out.freeze()
 }
 
@@ -45,6 +44,20 @@ pub fn encode_frame(id: i32, fmt: SchemaFormat, payload: &[u8]) -> Bytes {
 /// # Errors
 /// Returns an error when configuration is invalid, protocol encoding fails, the broker rejects the request, or transport I/O fails.
 pub fn decode_frame(bytes: &[u8]) -> Result<(i32, Vec<u8>), CodecError> {
+    let id = frame_schema_id(bytes)?;
+    Ok((id, bytes[5..].to_vec()))
+}
+
+/// Decode a frame while retaining shared ownership of its payload bytes.
+///
+/// # Errors
+/// Rejects a short header or a magic byte other than zero.
+pub fn decode_frame_bytes(bytes: Bytes) -> Result<(i32, Bytes), CodecError> {
+    let id = frame_schema_id(&bytes)?;
+    Ok((id, bytes.slice(5..)))
+}
+
+fn frame_schema_id(bytes: &[u8]) -> Result<i32, CodecError> {
     if bytes.len() < 5 {
         return Err(CodecError::Framing(format!(
             "frame too short: {} bytes (need at least 5)",
@@ -57,8 +70,7 @@ pub fn decode_frame(bytes: &[u8]) -> Result<(i32, Vec<u8>), CodecError> {
             bytes[0]
         )));
     }
-    let id = i32::from_be_bytes([bytes[1], bytes[2], bytes[3], bytes[4]]);
-    Ok((id, bytes[5..].to_vec()))
+    Ok(i32::from_be_bytes([bytes[1], bytes[2], bytes[3], bytes[4]]))
 }
 
 /// Strip the variable-length Protobuf message-index LEB128 prefix from a
@@ -72,17 +84,30 @@ pub fn decode_frame(bytes: &[u8]) -> Result<(i32, Vec<u8>), CodecError> {
 /// # Errors
 /// Returns an error when configuration is invalid, protocol encoding fails, the broker rejects the request, or transport I/O fails.
 pub fn strip_proto_index(payload: &[u8]) -> Result<Vec<u8>, CodecError> {
+    Ok(payload[proto_payload_start(payload)?..].to_vec())
+}
+
+/// Strip the message-index prefix without copying the owned payload.
+///
+/// # Errors
+/// Rejects truncated or overflowing message-index varints.
+pub fn strip_proto_index_bytes(payload: Bytes) -> Result<Bytes, CodecError> {
+    let start = proto_payload_start(&payload)?;
+    Ok(payload.slice(start..))
+}
+
+fn proto_payload_start(payload: &[u8]) -> Result<usize, CodecError> {
     let (count, mut pos) = read_varint(payload, 0)?;
     if count == 0 {
         // length-0 optimization: no index entries, rest is message
-        return Ok(payload[pos..].to_vec());
+        return Ok(pos);
     }
     // skip `count` index varints
     for _ in 0..count {
         let (_, next) = read_varint(payload, pos)?;
         pos = next;
     }
-    Ok(payload[pos..].to_vec())
+    Ok(pos)
 }
 
 /// Prepend the Protobuf message-index prefix to `payload`. The prefix is a
@@ -166,6 +191,65 @@ mod tests {
     }
 
     #[test]
+    fn owned_frame_decode_shares_payload_storage_and_preserves_golden_bytes() {
+        for format in [
+            SchemaFormat::Avro,
+            SchemaFormat::Json,
+            SchemaFormat::Protobuf,
+        ] {
+            for payload in [b"".as_slice(), b"message".as_slice()] {
+                let frame = encode_frame(7, format, payload);
+                let mut expected = vec![0, 0, 0, 0, 7];
+                if format == SchemaFormat::Protobuf {
+                    expected.push(0);
+                }
+                expected.extend_from_slice(payload);
+                assert2::assert!(frame.as_ref() == expected);
+                let (id, remainder) = decode_frame_bytes(frame.clone()).unwrap();
+                assert2::assert!(id == 7);
+                assert2::assert!(remainder.as_ref() == &frame[5..]);
+                if !remainder.is_empty() {
+                    assert2::assert!(remainder.as_ptr() == frame[5..].as_ptr());
+                }
+                let decoded = if format == SchemaFormat::Protobuf {
+                    strip_proto_index_bytes(remainder).unwrap()
+                } else {
+                    remainder
+                };
+                assert2::assert!(decoded.as_ref() == payload);
+                if !payload.is_empty() {
+                    assert2::assert!(
+                        decoded.as_ptr() == frame[frame.len() - payload.len()..].as_ptr()
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn owned_proto_decode_retains_varint_acceptance_and_errors() {
+        for (prefix, payload_start) in [
+            (vec![0], 1),
+            (vec![2, 3, 5], 3),
+            (vec![0x80, 0], 2),
+            (vec![0x82, 0, 0x83, 0, 0x85, 0], 6),
+        ] {
+            let bytes = Bytes::from([prefix.as_slice(), b"data"].concat());
+            let decoded = strip_proto_index_bytes(bytes.clone()).unwrap();
+            assert2::assert!(decoded.as_ref() == b"data");
+            assert2::assert!(decoded.as_ptr() == bytes[payload_start..].as_ptr());
+            assert2::assert!(decoded.as_ref() == strip_proto_index(&bytes).unwrap());
+        }
+        for bytes in [vec![], vec![0x80], vec![2, 3], vec![0x80; 10]] {
+            let expected = strip_proto_index(&bytes).unwrap_err().to_string();
+            let actual = strip_proto_index_bytes(Bytes::from(bytes))
+                .unwrap_err()
+                .to_string();
+            assert2::assert!(actual == expected);
+        }
+    }
+
+    #[test]
     fn strip_proto_index_first_message() {
         // [0x00] prefix + payload
         let with_index = prepend_proto_index(b"hello");
@@ -192,6 +276,12 @@ mod tests {
             ("short", &[0x00, 0x00, 0x00, 0x01][..]),
         ] {
             assert2::assert!(matches!(decode_frame(input), Err(CodecError::Framing(_))));
+            assert2::assert!(
+                decode_frame_bytes(Bytes::copy_from_slice(input))
+                    .unwrap_err()
+                    .to_string()
+                    == decode_frame(input).unwrap_err().to_string()
+            );
         }
     }
 }

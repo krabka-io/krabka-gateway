@@ -204,13 +204,13 @@ impl crate::codec::RecordCodec for SchemaRegistryCodec {
             });
         }
 
-        let (id, rest) = super::wire::decode_frame(&value)?;
+        let (id, rest) = super::wire::decode_frame_bytes(value)?;
         let (schema_str, fmt) = self.client.by_id(id).await?;
 
         // Protobuf carries a message-index prefix after the header; strip it
         // before deserialization.
         let payload = if fmt == SchemaFormat::Protobuf {
-            super::wire::strip_proto_index(&rest)?
+            super::wire::strip_proto_index_bytes(rest)?
         } else {
             rest
         };
@@ -218,7 +218,7 @@ impl crate::codec::RecordCodec for SchemaRegistryCodec {
         let json = self.prepared(id, fmt, &schema_str)?.deserialize(&payload)?;
 
         Ok(Decoded {
-            value: Bytes::from(payload),
+            value: payload,
             schema: Some(SchemaMeta {
                 subject: subject_for(topic),
                 id,
@@ -279,6 +279,79 @@ mod tests {
             }),
             frame_raw,
         )
+    }
+
+    #[tokio::test]
+    async fn schema_decode_shares_frame_storage_and_keeps_metadata() {
+        for (format, schema, json) in [
+            (
+                SchemaFormat::Avro,
+                AVRO_SCHEMA,
+                br#"{"id":1,"name":"a"}"#.as_slice(),
+            ),
+            (
+                SchemaFormat::Json,
+                r#"{"type":"object","required":["id"]}"#,
+                br#"{"id":1}"#.as_slice(),
+            ),
+            (
+                SchemaFormat::Protobuf,
+                r#"syntax = "proto3"; message R { int32 id = 1; }"#,
+                br#"{"id":1}"#.as_slice(),
+            ),
+        ] {
+            let codec = SchemaRegistryCodec::with_resolver(
+                Arc::new(FakeResolver {
+                    id: 5,
+                    schema: schema.to_string(),
+                    fmt: format,
+                }),
+                false,
+            );
+            let payload = codec
+                .prepared(5, format, schema)
+                .unwrap()
+                .serialize(json)
+                .unwrap();
+            let frame = super::super::wire::encode_frame(5, format, &payload);
+            let decoded = codec.decode("orders", frame.clone()).await.unwrap();
+            let start = 5 + usize::from(format == SchemaFormat::Protobuf);
+            assert2::assert!(decoded.value.as_ref() == payload);
+            if !payload.is_empty() {
+                assert2::assert!(decoded.value.as_ptr() == frame[start..].as_ptr());
+            }
+            assert2::assert!(
+                decoded.schema
+                    == Some(SchemaMeta {
+                        subject: "orders-value".to_string(),
+                        id: 5,
+                        format
+                    })
+            );
+            assert2::assert!(decoded.json.is_some());
+            assert2::assert!(frame == super::super::wire::encode_frame(5, format, &payload));
+        }
+    }
+
+    #[tokio::test]
+    async fn registry_lookup_still_precedes_proto_index_validation() {
+        let codec = SchemaRegistryCodec::with_resolver(
+            Arc::new(FakeResolver {
+                id: 5,
+                schema: r#"syntax = "proto3"; message R { int32 id = 1; }"#.to_string(),
+                fmt: SchemaFormat::Protobuf,
+            }),
+            false,
+        );
+        for (frame, registry_error) in [
+            (Bytes::from_static(&[0, 0, 0, 0, 6]), true),
+            (Bytes::from_static(&[0, 0, 0, 0, 5]), false),
+            (Bytes::from_static(&[0, 0, 0, 0, 5, 0x80]), false),
+        ] {
+            let error = codec.decode("orders", frame).await.unwrap_err();
+            assert2::assert!(matches!(error, CodecError::Registry(_)) == registry_error);
+            assert2::assert!(matches!(error, CodecError::Framing(_)) != registry_error);
+        }
     }
 
     #[test]
