@@ -52,3 +52,42 @@ pub fn validate(fmt: SchemaFormat, schema: &str, json: &[u8]) -> Result<(), Code
         SchemaFormat::Protobuf => protobuf::validate(schema, json),
     }
 }
+
+/// Compiled, immutable schema shared by all records carrying one registry id.
+pub(super) enum PreparedSchema {
+    Avro(apache_avro::Schema),
+    Json(jsonschema::Validator),
+    Protobuf(prost_reflect::MessageDescriptor),
+}
+
+impl PreparedSchema {
+    pub(super) fn new(fmt: SchemaFormat, schema: &str) -> Result<Self, CodecError> {
+        match fmt {
+            SchemaFormat::Avro => avro::prepare(schema).map(Self::Avro),
+            SchemaFormat::Json => json::prepare(schema).map(Self::Json),
+            SchemaFormat::Protobuf => protobuf::first_message_desc(schema).map(Self::Protobuf),
+        }
+    }
+
+    pub(super) fn serialize(&self, json: &[u8]) -> Result<Bytes, CodecError> {
+        match self {
+            Self::Avro(schema) => avro::serialize_prepared(schema, json),
+            Self::Json(validator) => {
+                json::validate_prepared(validator, json)?;
+                Ok(Bytes::copy_from_slice(json))
+            }
+            Self::Protobuf(schema) => protobuf::serialize_prepared(schema, json),
+        }
+    }
+
+    pub(super) fn deserialize(&self, payload: &[u8]) -> Result<Bytes, CodecError> {
+        match self {
+            Self::Avro(schema) => avro::deserialize_prepared(schema, payload),
+            Self::Json(validator) => {
+                json::validate_prepared(validator, payload)?;
+                Ok(Bytes::copy_from_slice(payload))
+            }
+            Self::Protobuf(schema) => protobuf::deserialize_prepared(schema, payload),
+        }
+    }
+}

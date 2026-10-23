@@ -24,9 +24,15 @@ use crate::codec::CodecError;
 /// # Errors
 /// Returns an error when configuration is invalid, protocol encoding fails, the broker rejects the request, or transport I/O fails.
 pub fn serialize(schema: &str, json: &[u8]) -> Result<Bytes, CodecError> {
-    let avro_schema = Schema::parse_str(schema)
-        .map_err(|e| CodecError::Serialize(format!("Avro schema parse: {e}")))?;
+    let avro_schema = prepare(schema)?;
+    serialize_prepared(&avro_schema, json)
+}
 
+pub(super) fn prepare(schema: &str) -> Result<Schema, CodecError> {
+    Schema::parse_str(schema).map_err(|e| CodecError::Serialize(format!("Avro schema parse: {e}")))
+}
+
+pub(super) fn serialize_prepared(avro_schema: &Schema, json: &[u8]) -> Result<Bytes, CodecError> {
     let json_value: serde_json::Value = serde_json::from_slice(json)
         .map_err(|e| CodecError::Serialize(format!("JSON parse: {e}")))?;
 
@@ -34,10 +40,10 @@ pub fn serialize(schema: &str, json: &[u8]) -> Result<Bytes, CodecError> {
     // The generic serde serializer encodes unsigned integers as fixed bytes.
     let avro_value = apache_avro::types::Value::try_from(json_value)
         .map_err(|e| CodecError::Serialize(format!("JSON to Avro: {e}")))?
-        .resolve(&avro_schema)
+        .resolve(avro_schema)
         .map_err(|e| CodecError::Serialize(format!("resolve: {e}")))?;
 
-    let datum = GenericDatumWriter::builder(&avro_schema)
+    let datum = GenericDatumWriter::builder(avro_schema)
         .build()
         .and_then(|writer| writer.write_value_to_vec(avro_value))
         .map_err(|e| CodecError::Serialize(format!("Avro encode: {e}")))?;
@@ -57,11 +63,16 @@ pub fn serialize(schema: &str, json: &[u8]) -> Result<Bytes, CodecError> {
 /// # Errors
 /// Returns an error when configuration is invalid, protocol encoding fails, the broker rejects the request, or transport I/O fails.
 pub fn deserialize(schema: &str, payload: &[u8]) -> Result<Bytes, CodecError> {
-    let avro_schema = Schema::parse_str(schema)
-        .map_err(|e| CodecError::Serialize(format!("Avro schema parse: {e}")))?;
+    let avro_schema = prepare(schema)?;
+    deserialize_prepared(&avro_schema, payload)
+}
 
+pub(super) fn deserialize_prepared(
+    avro_schema: &Schema,
+    payload: &[u8],
+) -> Result<Bytes, CodecError> {
     let mut cursor = std::io::Cursor::new(payload);
-    let avro_value = GenericDatumReader::builder(&avro_schema)
+    let avro_value = GenericDatumReader::builder(avro_schema)
         .build()
         .and_then(|reader| reader.read_value(&mut cursor))
         .map_err(|e| CodecError::Serialize(format!("Avro decode: {e}")))?;

@@ -28,7 +28,7 @@ use crate::codec::CodecError;
 /// descriptor for the **first** message type in it.
 ///
 /// The schema must be self-contained, with no external imports.
-fn first_message_desc(schema: &str) -> Result<MessageDescriptor, CodecError> {
+pub(super) fn first_message_desc(schema: &str) -> Result<MessageDescriptor, CodecError> {
     let fdp = protox_parse::parse("schema.proto", schema)
         .map_err(|e| CodecError::Serialize(format!("protobuf parse error: {e}")))?;
 
@@ -48,10 +48,15 @@ fn first_message_desc(schema: &str) -> Result<MessageDescriptor, CodecError> {
 /// # Errors
 /// Returns an error when configuration is invalid, protocol encoding fails, the broker rejects the request, or transport I/O fails.
 pub fn serialize(schema: &str, json: &[u8]) -> Result<Bytes, CodecError> {
-    let msg_desc = first_message_desc(schema)?;
+    serialize_prepared(&first_message_desc(schema)?, json)
+}
 
+pub(super) fn serialize_prepared(
+    msg_desc: &MessageDescriptor,
+    json: &[u8],
+) -> Result<Bytes, CodecError> {
     let mut de = serde_json::Deserializer::from_slice(json);
-    let dynmsg = DynamicMessage::deserialize(msg_desc, &mut de)
+    let dynmsg = DynamicMessage::deserialize(msg_desc.clone(), &mut de)
         .map_err(|e| CodecError::Serialize(format!("JSON->proto deserialize error: {e}")))?;
     // Consume any trailing whitespace; ignore the error (end() only fails on
     // trailing non-whitespace, which is rare and non-fatal for our use case).
@@ -67,9 +72,14 @@ pub fn serialize(schema: &str, json: &[u8]) -> Result<Bytes, CodecError> {
 /// # Errors
 /// Returns an error when configuration is invalid, protocol encoding fails, the broker rejects the request, or transport I/O fails.
 pub fn deserialize(schema: &str, payload: &[u8]) -> Result<Bytes, CodecError> {
-    let msg_desc = first_message_desc(schema)?;
+    deserialize_prepared(&first_message_desc(schema)?, payload)
+}
 
-    let dynmsg = DynamicMessage::decode(msg_desc, payload)
+pub(super) fn deserialize_prepared(
+    msg_desc: &MessageDescriptor,
+    payload: &[u8],
+) -> Result<Bytes, CodecError> {
+    let dynmsg = DynamicMessage::decode(msg_desc.clone(), payload)
         .map_err(|e| CodecError::Serialize(format!("proto decode error: {e}")))?;
 
     let mut buf = Vec::new();
