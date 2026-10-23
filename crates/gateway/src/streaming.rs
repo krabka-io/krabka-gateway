@@ -59,15 +59,29 @@ fn mark_acknowledged(
     topic: &str,
     partition: i32,
     frontier: i64,
-) {
+) -> usize {
     let key = (topic.to_string(), partition);
+    if acknowledged
+        .get(&key)
+        .is_some_and(|previous| frontier <= *previous)
+    {
+        return 0;
+    }
     acknowledged.insert(key.clone(), frontier);
+    let mut inspected = 0;
     if let Some(offsets) = delivered.get_mut(&key) {
-        offsets.retain(|delivered_offset| *delivered_offset > frontier);
+        while let Some(delivered_offset) = offsets.first() {
+            inspected += 1;
+            if *delivered_offset > frontier {
+                break;
+            }
+            offsets.pop_first();
+        }
         if offsets.is_empty() {
             delivered.remove(&key);
         }
     }
+    inspected
 }
 
 #[derive(Debug)]
@@ -1235,5 +1249,79 @@ mod tests {
         assert2::assert!(validate_ack(&delivered, &acknowledged, "topic", 2, 10) == Ok(false));
         assert2::assert!(validate_ack(&delivered, &acknowledged, "topic", 2, 11) == Ok(true));
         assert2::assert!(validate_ack(&delivered, &acknowledged, "topic", 2, 12) == Ok(true));
+    }
+
+    #[test]
+    fn acknowledged_frontier_prunes_only_the_large_delivered_prefix() {
+        let key = ("topic".to_string(), 2);
+        let mut delivered = DeliveredOffsets::from([(
+            key.clone(),
+            (0..10_000).collect::<std::collections::BTreeSet<_>>(),
+        )]);
+        let mut acknowledged = std::collections::HashMap::new();
+
+        let inspected = mark_acknowledged(&mut delivered, &mut acknowledged, "topic", 2, 1);
+
+        assert2::assert!(inspected == 3);
+        assert2::assert!(acknowledged.get(&key) == Some(&1));
+        assert2::assert!(
+            delivered.get(&key) == Some(&(2..10_000).collect::<std::collections::BTreeSet<_>>())
+        );
+    }
+
+    #[test]
+    fn unchanged_acknowledged_frontier_does_not_inspect_the_suffix() {
+        let key = ("topic".to_string(), 2);
+        let suffix = (2..10_000).collect::<std::collections::BTreeSet<_>>();
+        let mut delivered = DeliveredOffsets::from([(
+            key.clone(),
+            (0..10_000).collect::<std::collections::BTreeSet<_>>(),
+        )]);
+        let mut acknowledged = std::collections::HashMap::new();
+        mark_acknowledged(&mut delivered, &mut acknowledged, "topic", 2, 1);
+
+        let inspected = (0..10_000)
+            .map(|_| mark_acknowledged(&mut delivered, &mut acknowledged, "topic", 2, 1))
+            .sum::<usize>();
+
+        assert2::assert!(inspected == 0);
+        assert2::assert!(delivered.get(&key) == Some(&suffix));
+    }
+
+    #[test]
+    fn ordered_acknowledgements_inspect_a_linear_number_of_offsets() {
+        let mut delivered = DeliveredOffsets::from([(
+            ("topic".to_string(), 2),
+            (0..10_000).collect::<std::collections::BTreeSet<_>>(),
+        )]);
+        let mut acknowledged = std::collections::HashMap::new();
+
+        let inspected = (0..10_000)
+            .map(|frontier| {
+                mark_acknowledged(&mut delivered, &mut acknowledged, "topic", 2, frontier)
+            })
+            .sum::<usize>();
+
+        assert2::assert!(inspected == 19_999);
+        assert2::assert!(delivered.is_empty());
+    }
+
+    #[test]
+    fn acknowledged_frontier_handles_maximum_offset_without_overflow() {
+        let key = ("topic".to_string(), 2);
+        let mut delivered = DeliveredOffsets::from([(
+            key.clone(),
+            std::collections::BTreeSet::from([i64::MAX - 1, i64::MAX]),
+        )]);
+        let mut acknowledged = std::collections::HashMap::new();
+
+        mark_acknowledged(&mut delivered, &mut acknowledged, "topic", 2, i64::MAX - 1);
+        assert2::assert!(
+            delivered.get(&key) == Some(&std::collections::BTreeSet::from([i64::MAX]))
+        );
+
+        mark_acknowledged(&mut delivered, &mut acknowledged, "topic", 2, i64::MAX);
+        assert2::assert!(delivered.is_empty());
+        assert2::assert!(acknowledged.get(&key) == Some(&i64::MAX));
     }
 }
