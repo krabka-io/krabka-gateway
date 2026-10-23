@@ -139,6 +139,11 @@ pub(crate) enum NumericValue {
 }
 
 impl CompiledFilter {
+    /// Whether the normalized SQL omits a predicate entirely.
+    pub(crate) fn is_unfiltered(&self) -> bool {
+        self.sql.is_empty()
+    }
+
     pub(crate) fn compile(sql: &str) -> Result<Self, FilterCompileError> {
         let sql = sql.trim();
         if sql.is_empty() {
