@@ -96,7 +96,7 @@ enum FilteredRecordDecision {
 }
 
 impl FilteredPollBatch {
-    #[cfg(all(test, feature = "arrow"))]
+    #[cfg(test)]
     fn delivered(&self) -> impl Iterator<Item = &crate::consume::DecodedConsumerRecord> {
         self.decisions.iter().filter_map(|decision| match decision {
             FilteredRecordDecision::Deliver(record) => Some(record),
@@ -104,7 +104,7 @@ impl FilteredPollBatch {
         })
     }
 
-    #[cfg(all(test, feature = "arrow"))]
+    #[cfg(test)]
     fn filtered(&self) -> impl Iterator<Item = &crate::consume::DecodedConsumerRecord> {
         self.decisions.iter().filter_map(|decision| match decision {
             FilteredRecordDecision::Deliver(_) => None,
@@ -218,9 +218,11 @@ fn filter_polled_records_with_json_fallback(
     let mut decisions = Vec::with_capacity(records.len());
 
     for record in records {
-        let decision = filter
-            .evaluate_decoded_record(structured_json_or_unframed_value(&record), &record.value);
-        if decision.should_deliver() {
+        if filter.is_unfiltered()
+            || filter
+                .evaluate_decoded_record(structured_json_or_unframed_value(&record), &record.value)
+                .should_deliver()
+        {
             decisions.push(FilteredRecordDecision::Deliver(record));
         } else {
             decisions.push(FilteredRecordDecision::Filter(record));
@@ -452,7 +454,9 @@ fn filter_json_fallback_record(
     record: crate::consume::DecodedConsumerRecord,
     decisions: &mut Vec<FilteredRecordDecision>,
 ) {
-    if filter.matches_structured_json(structured_json_or_unframed_value(&record)) {
+    if filter.is_unfiltered()
+        || filter.matches_structured_json(structured_json_or_unframed_value(&record))
+    {
         decisions.push(FilteredRecordDecision::Deliver(record));
     } else {
         decisions.push(FilteredRecordDecision::Filter(record));
@@ -895,6 +899,146 @@ mod tests {
             schema: decoded.schema,
             json: decoded.json,
         }
+    }
+
+    fn unframed_record(value: Bytes) -> crate::consume::DecodedConsumerRecord {
+        crate::consume::DecodedConsumerRecord {
+            topic: "raw-orders".to_string(),
+            partition: crate::ids::PartitionIndex(2),
+            offset: crate::ids::Offset(7),
+            timestamp: crate::ids::Timestamp(1234),
+            key: Some(Bytes::from_static(b"key")),
+            raw_value: value.clone(),
+            value,
+            headers: Vec::new(),
+            schema: None,
+            json: None,
+        }
+    }
+
+    #[test]
+    fn unfiltered_json_fallback_preserves_raw_records() {
+        let large_json = Bytes::from(format!(
+            "[{}]",
+            "{\"kind\":\"keep\"},".repeat(4096).trim_end_matches(',')
+        ));
+        for sql in ["", " \t\n "] {
+            let filter = CompiledFilter::compile(sql).expect("empty filter compiles");
+            for value in [
+                large_json.clone(),
+                Bytes::from_static(b"{malformed"),
+                Bytes::new(),
+            ] {
+                let record = unframed_record(value);
+                let expected = inbound_from_decoded_record(record.clone());
+                let filtered = filter_polled_records(&filter, vec![record]);
+                #[cfg(feature = "arrow")]
+                let filtered = filtered.expect("non-Arrow raw bytes use the JSON fallback");
+                assert2::assert!(filtered.filtered().count() == 0);
+                let delivered = filtered
+                    .delivered()
+                    .next()
+                    .expect("raw record delivered")
+                    .clone();
+                assert2::assert!(inbound_from_decoded_record(delivered) == expected);
+            }
+        }
+    }
+
+    #[test]
+    fn nonempty_json_fallback_keeps_predicate_and_malformed_input_semantics() {
+        let filter = CompiledFilter::compile("kind = 'keep'").expect("filter compiles");
+        for (payload, expected) in [
+            (br#"{"kind":"keep","customer":{"id":1}}"#.as_slice(), true),
+            (br#"{"kind":"skip"}"#.as_slice(), false),
+            (br#"{"kind":{"nested":"keep"}}"#.as_slice(), false),
+            (b"{malformed".as_slice(), false),
+        ] {
+            let filtered = filter_polled_records(
+                &filter,
+                vec![unframed_record(Bytes::copy_from_slice(payload))],
+            );
+            #[cfg(feature = "arrow")]
+            let filtered = filtered.expect("raw JSON fallback evaluates");
+            assert2::assert!((filtered.delivered().count() == 1) == expected);
+            assert2::assert!((filtered.filtered().count() == 1) != expected);
+        }
+    }
+
+    #[cfg(feature = "arrow")]
+    #[test]
+    fn complex_sql_is_not_an_unfiltered_json_fallback() {
+        let filter =
+            CompiledFilter::compile("status IN ('PAID', 'SHIPPED')").expect("complex SQL compiles");
+        let filtered = filter_polled_records(
+            &filter,
+            vec![unframed_record(Bytes::from_static(br#"{"status":"PAID"}"#))],
+        )
+        .expect("non-Arrow records use the established legacy fallback");
+        assert2::assert!(filtered.delivered().count() == 0);
+        assert2::assert!(filtered.filtered().count() == 1);
+    }
+
+    #[cfg(feature = "arrow")]
+    #[test]
+    fn unfiltered_records_keep_arrow_validation_and_empty_stream_filtering() {
+        use arrow::{
+            array::{Int32Array, RecordBatch},
+            datatypes::{DataType, Field, Schema},
+            ipc::writer::StreamWriter,
+        };
+
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "value",
+            DataType::Int32,
+            false,
+        )]));
+        let batch = RecordBatch::try_new(
+            Arc::clone(&schema),
+            vec![Arc::new(Int32Array::from(vec![1]))],
+        )
+        .unwrap();
+        let mut stream = Vec::new();
+        {
+            let mut writer = StreamWriter::try_new(&mut stream, &schema).unwrap();
+            writer.write(&batch).unwrap();
+            writer.finish().unwrap();
+        }
+        let mut empty = Vec::new();
+        StreamWriter::try_new(&mut empty, &schema)
+            .unwrap()
+            .finish()
+            .unwrap();
+        let mut corrupt = empty[..empty.len() - 8].to_vec();
+        corrupt.extend_from_slice(&[255, 255, 255, 255, 4, 0, 0, 0, 0, 0, 0, 0]);
+
+        let filter = CompiledFilter::compile("  ").unwrap();
+        for (value, deliveries) in [(stream, 1), (empty, 0)] {
+            let filtered =
+                filter_polled_records(&filter, vec![unframed_record(Bytes::from(value))]).unwrap();
+            assert2::assert!(filtered.delivered().count() == deliveries);
+        }
+        assert2::assert!(
+            filter_polled_records(&filter, vec![unframed_record(Bytes::from(corrupt))]).is_err()
+        );
+    }
+
+    #[cfg(feature = "arrow")]
+    #[tokio::test]
+    async fn unfiltered_schema_json_keeps_the_schema_bridge() {
+        let record = schema_registry_record(
+            7,
+            17,
+            SchemaFormat::Avro,
+            EVOLUTION_AVRO_V1,
+            &serde_json::json!({"status":"PAID", "total":125}),
+        )
+        .await;
+        let expected = inbound_from_decoded_record(record.clone());
+        let filtered =
+            filter_polled_records(&CompiledFilter::compile("").unwrap(), vec![record]).unwrap();
+        let delivered = filtered.delivered().next().unwrap().clone();
+        assert2::assert!(inbound_from_decoded_record(delivered) == expected);
     }
 
     #[test]
