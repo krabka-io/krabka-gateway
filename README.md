@@ -56,6 +56,12 @@ git diff --exit-code -- sdks
 CI runs exactly those two commands, so a change to the `.proto` that is not
 regenerated fails the build rather than leaving the SDKs behind the server.
 
+Explicit-ack subscriptions advance commits in actual delivered-offset order, so
+compacted and read-committed offset gaps do not stall progress. A partition may
+have at most 100,000 outstanding delivered records, including acknowledged records
+waiting behind an earlier unacknowledged record. Exceeding that bound terminates
+the stream with `RESOURCE_EXHAUSTED` before emitting the new batch.
+
 ## Build
 
 ```bash

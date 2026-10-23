@@ -703,19 +703,27 @@ pub fn subscribe_inner(
                     }
                 }
             }
-            for msg in to_emit {
-                yield Ok(msg);
+            // Register the complete visible batch before any filtered-record
+            // acknowledgement, including deliveries that the client has not
+            // acknowledged yet. Missing Kafka offsets are not missing acks.
+            if !auto_commit {
+                for (topic, partition, offset) in deliveries {
+                    if let Err(error) = session.record_delivery(&topic, partition, offset) {
+                        frame_error = Some(ConnectError::new_resource_exhausted(error.to_string()));
+                        break;
+                    }
+                }
             }
             if let Some(error) = frame_error {
                 yield Err(error);
                 break;
             }
+            for msg in to_emit {
+                yield Ok(msg);
+            }
 
             let mut explicit_commit = false;
             if !auto_commit {
-                for (topic, partition, offset) in deliveries {
-                    session.record_delivery(&topic, partition, offset);
-                }
                 for (topic, partition, offset) in filtered_acks
                     .into_iter()
                     .chain(client_ack)

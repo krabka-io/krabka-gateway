@@ -34,17 +34,18 @@ pub struct DecodedConsumerRecord {
     pub json: Option<bytes::Bytes>,
 }
 
-/// Maximum number of acknowledgements that can wait above one gap in a
-/// partition. The consumer cannot pause one assigned partition independently,
-/// so exceeding this bound terminates the stream instead of growing memory
-/// without limit.
-pub(crate) const MAX_PENDING_PER_PARTITION: usize = 100_000;
+/// Maximum actual deliveries that can wait above an unacknowledged record in
+/// one partition. The bound includes acknowledgements waiting behind it. The
+/// consumer cannot pause one assigned partition independently, so exceeding
+/// this bound terminates the stream instead of growing memory without limit.
+pub(crate) const MAX_OUTSTANDING_PER_PARTITION: usize = 100_000;
 
 #[derive(Debug, Default)]
 struct PartitionAckState {
     /// Highest contiguously acknowledged offset. Before the first delivery is
     /// acknowledged, this is the offset immediately before that delivery.
     frontier: Option<i64>,
+    delivered: BTreeSet<i64>,
     pending: BTreeSet<i64>,
     last_committed_frontier: Option<i64>,
 }
@@ -53,44 +54,49 @@ impl PartitionAckState {
     /// Establish the first actually delivered offset as the lower bound. This
     /// is safe for compacted logs and prevents a later filtered-record ack from
     /// skipping an earlier delivered record that is still unacknowledged.
-    fn record_delivery(&mut self, offset: i64) {
+    fn record_delivery(&mut self, offset: i64) -> Result<(), ()> {
+        if self.frontier.is_some_and(|frontier| offset <= frontier) {
+            return Ok(());
+        }
+        if !self.delivered.contains(&offset)
+            && self.delivered.len() >= MAX_OUTSTANDING_PER_PARTITION
+        {
+            return Err(());
+        }
         if self.frontier.is_none() {
             let baseline = offset - 1;
             self.frontier = Some(baseline);
             self.last_committed_frontier = Some(baseline);
         }
+        self.delivered.insert(offset);
+        Ok(())
     }
 
     fn record_ack(&mut self, offset: i64) -> Result<(), ()> {
-        match self.frontier {
-            None => {
-                // Unit callers and future non-stream users can still lazily
-                // seed directly from the first acknowledged delivery.
-                self.frontier = Some(offset);
-                self.drain();
-            }
-            Some(frontier) if offset <= frontier => {}
-            Some(frontier) if frontier.checked_add(1) == Some(offset) => {
-                self.frontier = Some(offset);
-                self.drain();
-            }
-            Some(_) => {
-                if !self.pending.contains(&offset)
-                    && self.pending.len() >= MAX_PENDING_PER_PARTITION
-                {
-                    return Err(());
-                }
-                self.pending.insert(offset);
-            }
+        if self.frontier.is_none() {
+            // Preserve lazy seeding for a caller acknowledging its first
+            // delivery directly. Streams register every delivery first.
+            self.record_delivery(offset)?;
         }
+        if self.frontier.is_some_and(|frontier| offset <= frontier) {
+            return Ok(());
+        }
+        if !self.delivered.contains(&offset) {
+            return Err(());
+        }
+        self.pending.insert(offset);
+        self.drain();
         Ok(())
     }
 
     fn drain(&mut self) {
-        while let Some(next) = self.frontier.and_then(|offset| offset.checked_add(1)) {
+        // Kafka offsets need not be consecutive: compaction, transaction
+        // markers and aborted transactions can all leave invisible offsets.
+        while let Some(next) = self.delivered.first().copied() {
             if !self.pending.remove(&next) {
                 break;
             }
+            self.delivered.pop_first();
             self.frontier = Some(next);
         }
     }
@@ -222,14 +228,26 @@ impl ConsumeSession {
     /// Record an offset that the stream delivered or filtered. This establishes
     /// the partition's lazy, delivery-derived lower bound without acknowledging
     /// the record.
-    pub(crate) fn record_delivery(&mut self, topic: &str, partition: i32, offset: i64) {
+    /// # Errors
+    /// Returns an error when outstanding deliveries exceed the partition cap.
+    pub(crate) fn record_delivery(
+        &mut self,
+        topic: &str,
+        partition: i32,
+        offset: i64,
+    ) -> Result<(), GatewayError> {
         if partition < 0 || offset < 0 {
-            return;
+            return Ok(());
         }
         self.ack_tracker
             .entry((topic.to_string(), partition))
             .or_default()
-            .record_delivery(offset);
+            .record_delivery(offset)
+            .map_err(|()| GatewayError::TooManyUnacked {
+                topic: topic.to_string(),
+                partition,
+                offset,
+            })
     }
 
     /// Record one delivered-record acknowledgement in the partition's bounded
@@ -352,8 +370,8 @@ mod ack_tests {
     #[test]
     fn delivered_lower_offset_prevents_filtered_tail_from_skipping_a_gap() {
         let mut state = PartitionAckState::default();
-        state.record_delivery(10);
-        state.record_delivery(11);
+        state.record_delivery(10).unwrap();
+        state.record_delivery(11).unwrap();
 
         assert!(state.record_ack(11).is_ok());
 
@@ -364,7 +382,9 @@ mod ack_tests {
     #[test]
     fn in_order_and_gap_filling_acks_advance_contiguously() {
         let mut state = PartitionAckState::default();
-        state.record_delivery(10);
+        for offset in 10..=13 {
+            state.record_delivery(offset).unwrap();
+        }
         for offset in [10, 12, 13] {
             assert!(state.record_ack(offset).is_ok());
         }
@@ -395,14 +415,106 @@ mod ack_tests {
     }
 
     #[test]
-    fn pending_ack_cap_fails_fast() {
+    fn outstanding_cap_blocks_growth_but_allows_gap_filling_acknowledgements() {
         let mut state = PartitionAckState::default();
-        state.record_delivery(0);
-        for offset in 1..=i64::try_from(MAX_PENDING_PER_PARTITION).expect("cap fits i64") {
+        let cap = i64::try_from(MAX_OUTSTANDING_PER_PARTITION).unwrap();
+        for offset in 0..cap {
+            state.record_delivery(offset).unwrap();
+        }
+        for offset in 1..cap {
             assert!(state.record_ack(offset).is_ok());
         }
 
-        assert!(let Err(()) = state
-            .record_ack(i64::try_from(MAX_PENDING_PER_PARTITION).expect("cap fits i64") + 1));
+        assert!(state.record_delivery(cap).is_err());
+        assert!(
+            state.record_delivery(cap - 1).is_ok(),
+            "duplicate delivery needs no capacity"
+        );
+        assert!(
+            state.record_ack(cap - 1).is_ok(),
+            "duplicate ack needs no capacity"
+        );
+        assert!(
+            state.record_ack(0).is_ok(),
+            "the oldest ack can release a full window"
+        );
+        assert!(state.commit_value() == Some(cap));
+        assert!(state.delivered.is_empty());
+        assert!(state.pending.is_empty());
+        assert!(state.record_delivery(cap).is_ok());
+    }
+
+    #[test]
+    fn sparse_in_order_deliveries_do_not_require_invisible_offsets() {
+        let mut state = PartitionAckState::default();
+        for offset in [10, 12] {
+            state.record_delivery(offset).unwrap();
+        }
+        state.record_ack(10).unwrap();
+        state.record_ack(12).unwrap();
+        assert!(state.commit_value() == Some(13));
+        assert!(state.delivered.is_empty());
+        assert!(state.pending.is_empty());
+    }
+
+    #[test]
+    fn sparse_out_of_order_ack_cannot_skip_an_earlier_visible_delivery() {
+        let mut state = PartitionAckState::default();
+        for offset in [10, 12] {
+            state.record_delivery(offset).unwrap();
+        }
+        state.record_ack(12).unwrap();
+        assert!(state.commit_value().is_none());
+        state.record_ack(10).unwrap();
+        assert!(state.commit_value() == Some(13));
+    }
+
+    #[test]
+    fn complete_gapped_poll_registration_protects_deliveries_from_filtered_tail() {
+        let mut state = PartitionAckState::default();
+        for offset in [10, 12, 15] {
+            state.record_delivery(offset).unwrap();
+        }
+        // The server filters 15. The client still owes acknowledgements for
+        // both visible records, even though their offsets are not consecutive.
+        state.record_ack(15).unwrap();
+        assert!(state.commit_value().is_none());
+        state.record_ack(10).unwrap();
+        assert!(state.commit_value() == Some(11));
+        state.record_ack(12).unwrap();
+        assert!(state.commit_value() == Some(16));
+    }
+
+    #[test]
+    fn repeated_delivery_below_frontier_does_not_create_an_immortal_head() {
+        let mut state = PartitionAckState::default();
+        for offset in [10, 12] {
+            state.record_delivery(offset).unwrap();
+        }
+        state.record_ack(10).unwrap();
+        for offset in [10, 3, 12] {
+            state.record_delivery(offset).unwrap();
+        }
+        state.record_ack(12).unwrap();
+        assert!(state.commit_value() == Some(13));
+        assert!(state.delivered.is_empty());
+    }
+
+    #[test]
+    fn unregistered_ack_does_not_invent_a_visible_delivery() {
+        let mut state = PartitionAckState::default();
+        state.record_delivery(10).unwrap();
+        assert!(state.record_ack(12).is_err());
+        state.record_ack(10).unwrap();
+        assert!(state.commit_value() == Some(11));
+    }
+
+    #[test]
+    fn maximum_offset_acknowledgement_does_not_overflow() {
+        let mut state = PartitionAckState::default();
+        state.record_delivery(i64::MAX).unwrap();
+        state.record_ack(i64::MAX).unwrap();
+        assert!(state.frontier == Some(i64::MAX));
+        assert!(state.commit_value().is_none());
     }
 }
