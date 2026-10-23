@@ -56,6 +56,14 @@ git diff --exit-code -- sdks
 CI runs exactly those two commands, so a change to the `.proto` that is not
 regenerated fails the build rather than leaving the SDKs behind the server.
 
+Queue sessions keep one outstanding acquisition batch, bounded by the session's
+`max_messages` (at most 500). Acknowledge or release every message in that batch
+before acquiring another batch with the same session ID. An acquire made while
+messages remain outstanding returns `RESOURCE_EXHAUSTED`; parallel workers can
+use separate sessions. If acquisition locks expire, send acknowledgements to
+reconcile the broker's verdict or start a new session. The gateway does not use a
+local timeout to discard a lease that the broker may still consider valid.
+
 Explicit-ack subscriptions advance commits in actual delivered-offset order, so
 compacted and read-committed offset gaps do not stall progress. A partition may
 have at most 100,000 outstanding delivered records, including acknowledged records
