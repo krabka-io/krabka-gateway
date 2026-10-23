@@ -161,28 +161,20 @@ async fn send_handler_ok_and_error_arms() {
     let _router = krabka_gateway::router(state.clone());
 
     let send = pb::SendRequest {
-        records: vec![
-            pb::Record {
+        records: (0..131)
+            .map(|index| pb::Record {
                 topic: "wire-topic".into(),
-                key: None,
-                body: Some(pb::record::Body::Raw(b"ok".to_vec())),
+                key: Some(b"same-partition-key".to_vec()),
+                body: Some(pb::record::Body::Raw(
+                    format!("record-{index}").into_bytes(),
+                )),
                 headers: vec![],
-                partition: None,
+                partition: Some(0),
                 timestamp_ms: None,
-                idempotency_key: None,
+                idempotency_key: (index == 65).then(|| "k1".into()),
                 schema: None,
-            },
-            pb::Record {
-                topic: "wire-topic".into(),
-                key: None,
-                body: Some(pb::record::Body::Raw(b"dup".to_vec())),
-                headers: vec![],
-                partition: None,
-                timestamp_ms: None,
-                idempotency_key: Some("k1".into()),
-                schema: None,
-            },
-        ],
+            })
+            .collect(),
         acks: pb::Acks::All as i32,
     };
 
@@ -194,9 +186,27 @@ async fn send_handler_ok_and_error_arms() {
     assert2::assert!(
         body.results
             .iter()
-            .map(|result| (result.partition, result.error.is_some()))
+            .map(|result| (
+                result.partition,
+                result.offset,
+                result.deduplicated,
+                result.error.is_some()
+            ))
             .collect::<Vec<_>>()
-            == vec![(0, false), (-1, true)]
+            == (0..131)
+                .map(|index| {
+                    if index == 65 {
+                        (-1, -1, false, true)
+                    } else {
+                        (
+                            0,
+                            i64::from(if index < 65 { index } else { index - 1 }),
+                            false,
+                            false,
+                        )
+                    }
+                })
+                .collect::<Vec<_>>()
     );
 
     broker.shutdown().await;

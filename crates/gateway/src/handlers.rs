@@ -7,6 +7,7 @@ use std::{net::SocketAddr, sync::Arc};
 
 use axum::Extension;
 use connectrpc_axum::message::{ConnectError, ConnectRequest, ConnectResponse};
+use futures_util::{FutureExt as _, StreamExt as _, future::BoxFuture, stream::FuturesOrdered};
 use krabka_authz::{AuthorizationRequest, AuthorizationResult};
 use krabka_metadata::{AclOperation, ResourceType};
 use krabka_security::{AuthMethod, Principal};
@@ -205,7 +206,7 @@ pub async fn send(
     // bearer task) or ANONYMOUS; the caller's peer address or the unknown host.
     let eff = principal.map_or_else(anonymous_principal, |Extension(p)| p);
     let host = peer.map_or_else(unknown_host, |Extension(a)| a);
-    let mut results = Vec::with_capacity(msg.records.len());
+    let mut window = SendWindow::new(msg.records.len());
     for r in msg.records {
         let rec = crate::handlers::to_gateway_record(r);
         // Per-record Write ACL on the target topic. Deny ⇒ skip producing and
@@ -220,50 +221,188 @@ pub async fn send(
         ) == AuthorizationResult::Deny
         {
             metrics().record_send("unauthorized");
-            results.push(error_result(&crate::error::GatewayError::Unauthorized(
-                format!("Write Topic:{}", rec.topic),
+            let result = error_result(&crate::error::GatewayError::Unauthorized(format!(
+                "Write Topic:{}",
+                rec.topic
             )));
+            window.push(async move { result }.boxed()).await;
             continue;
         }
-        let t0 = std::time::Instant::now();
-        let produce_result = state.produce.produce_with_acks(rec, &eff, acks).await;
-        metrics().observe_produce_latency(t0.elapsed().as_time());
-        let result = match produce_result {
-            Ok(ref o) if o.deduplicated => {
-                metrics().record_send("deduplicated");
-                pb::RecordResult {
-                    partition: o.partition.into(),
-                    offset: o.offset.into(),
-                    deduplicated: o.deduplicated,
-                    error: None,
-                }
-            }
-            Ok(o) => {
-                metrics().record_send("ok");
-                pb::RecordResult {
-                    partition: o.partition.into(),
-                    offset: o.offset.into(),
-                    deduplicated: o.deduplicated,
-                    error: None,
-                }
-            }
-            Err(ref e @ crate::error::GatewayError::Unauthorized(_)) => {
-                metrics().record_send("unauthorized");
-                crate::handlers::error_result(e)
-            }
-            Err(ref e) => {
-                metrics().record_send("error");
-                crate::handlers::error_result(e)
-            }
-        };
-        results.push(result);
+        if rec.idempotency_key.is_some() {
+            // A dedup transaction or forwarding operation remains a barrier in
+            // input order, including when plain and keyed records are mixed.
+            window.drain().await;
+            let t0 = std::time::Instant::now();
+            let result = state.produce.produce_with_acks(rec, &eff, acks).await;
+            window.results.push(send_result(result, t0));
+        } else {
+            // Enqueue in input order so per-partition ordering does not depend
+            // on how concurrently polled futures happen to be scheduled.
+            let t0 = std::time::Instant::now();
+            let delivery = state.produce.enqueue_plain_with_acks(&rec, acks).await;
+            window
+                .push(
+                    async move {
+                        let result = match delivery {
+                            Ok(delivery) => delivery
+                                .await
+                                .map(|meta| crate::types::RecordOutcome {
+                                    partition: crate::ids::PartitionIndex(meta.partition),
+                                    offset: crate::ids::Offset(meta.offset),
+                                    deduplicated: false,
+                                })
+                                .map_err(crate::error::GatewayError::Producer),
+                            Err(error) => Err(error),
+                        };
+                        send_result(result, t0)
+                    }
+                    .boxed(),
+                )
+                .await;
+        }
     }
+    window.drain().await;
+    let results = window.results;
     Ok(ConnectResponse::new(pb::SendResponse { results }))
+}
+
+const SEND_WINDOW_CAPACITY: usize = 64;
+
+/// Bounded delivery window; futures represent records already enqueued.
+struct SendWindow<T> {
+    pending: FuturesOrdered<BoxFuture<'static, T>>,
+    results: Vec<T>,
+}
+
+impl<T: 'static> SendWindow<T> {
+    fn new(records: usize) -> Self {
+        Self {
+            pending: FuturesOrdered::new(),
+            results: Vec::with_capacity(records),
+        }
+    }
+
+    async fn push(&mut self, delivery: BoxFuture<'static, T>) {
+        self.pending.push_back(delivery);
+        if self.pending.len() == SEND_WINDOW_CAPACITY {
+            self.drain().await;
+        }
+    }
+
+    async fn drain(&mut self) {
+        // Poll all deliveries together so completion-side metrics run as each
+        // acknowledgement arrives, while yielding response values in input order.
+        while let Some(result) = self.pending.next().await {
+            self.results.push(result);
+        }
+    }
+}
+
+fn send_result(
+    result: Result<crate::types::RecordOutcome, crate::error::GatewayError>,
+    started: std::time::Instant,
+) -> pb::RecordResult {
+    metrics().observe_produce_latency(started.elapsed().as_time());
+    match result {
+        Ok(outcome) => {
+            metrics().record_send(if outcome.deduplicated {
+                "deduplicated"
+            } else {
+                "ok"
+            });
+            pb::RecordResult {
+                partition: outcome.partition.into(),
+                offset: outcome.offset.into(),
+                deduplicated: outcome.deduplicated,
+                error: None,
+            }
+        }
+        Err(error) => {
+            metrics().record_send(
+                if matches!(error, crate::error::GatewayError::Unauthorized(_)) {
+                    "unauthorized"
+                } else {
+                    "error"
+                },
+            );
+            error_result(&error)
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn send_window_observes_later_completion_before_slow_first_delivery() {
+        let mut window = SendWindow::new(2);
+        let (first_tx, first_rx) = tokio::sync::oneshot::channel();
+        let (later_tx, later_rx) = tokio::sync::oneshot::channel();
+        let (observed_tx, observed_rx) = tokio::sync::oneshot::channel();
+        window
+            .push(async move { first_rx.await.unwrap() }.boxed())
+            .await;
+        window
+            .push(
+                async move {
+                    let value = later_rx.await.unwrap();
+                    // Production futures observe latency at this same point,
+                    // before the completed result is returned to the window.
+                    observed_tx.send(()).unwrap();
+                    value
+                }
+                .boxed(),
+            )
+            .await;
+        let draining = tokio::spawn(async move {
+            window.drain().await;
+            window.results
+        });
+        later_tx.send(2).unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5), observed_rx)
+            .await
+            .expect("later completion must be observed before the first acknowledgement")
+            .unwrap();
+        assert2::assert!(!draining.is_finished());
+        first_tx.send(1).unwrap();
+        assert2::assert!(draining.await.unwrap() == vec![1, 2]);
+    }
+
+    #[tokio::test]
+    async fn send_window_enqueues_before_waiting_and_keeps_input_order() {
+        let mut window = SendWindow::new(130);
+        for base in [0, 64] {
+            let mut acknowledgements = Vec::new();
+            for index in base..base + 63 {
+                let (tx, rx) = tokio::sync::oneshot::channel();
+                acknowledgements.push((index, tx));
+                window.push(async move { rx.await.unwrap() }.boxed()).await;
+            }
+            // Delivery handles can remain unresolved while the next 63 records
+            // enqueue. A serial send loop would stop on the first handle.
+            assert2::assert!(window.results.len() == base);
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            acknowledgements.push((base + 63, tx));
+            // Complete out of order, including a per-record error. Response
+            // positions must still match the input positions.
+            for (index, tx) in acknowledgements.into_iter().rev() {
+                tx.send(if index == 17 { Err(index) } else { Ok(index) })
+                    .unwrap();
+            }
+            window.push(async move { rx.await.unwrap() }.boxed()).await;
+            assert2::assert!(window.pending.is_empty());
+        }
+        window.push(async { Ok(128) }.boxed()).await;
+        window.push(async { Ok(129) }.boxed()).await;
+        window.drain().await;
+        assert2::assert!(
+            window.results
+                == (0..130)
+                    .map(|index| if index == 17 { Err(index) } else { Ok(index) })
+                    .collect::<Vec<_>>()
+        );
+    }
 
     #[test]
     fn producer_ack_wire_values_map_to_native_modes() {

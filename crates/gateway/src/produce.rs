@@ -7,7 +7,7 @@
 
 use std::sync::Arc;
 
-use krabka_client_producer::{Acks, Header, Producer, ProducerRecord};
+use krabka_client_producer::{Acks, DeliveryHandle, Header, Producer, ProducerRecord};
 use krabka_security::Principal;
 
 use crate::{
@@ -249,6 +249,33 @@ impl ProduceCore {
         }
     }
 
+    /// Encode and enqueue a plain record without waiting for its acknowledgement.
+    /// Callers must keep idempotency-key records on `produce_with_acks`.
+    pub(crate) async fn enqueue_plain_with_acks(
+        &self,
+        rec: &GatewayRecord,
+        acks: Acks,
+    ) -> Result<DeliveryHandle, GatewayError> {
+        if rec.idempotency_key.is_some() {
+            return Err(GatewayError::Other(
+                "idempotency_key requires the dedup produce path".into(),
+            ));
+        }
+        let value = self.codec.encode(&rec.topic, rec.encode_body()).await?;
+        self.producer_for_acks(acks)
+            .enqueue(to_producer_record(rec, value))
+            .await
+            .map_err(GatewayError::Producer)
+    }
+
+    fn producer_for_acks(&self, acks: Acks) -> &Producer {
+        match acks {
+            Acks::All => &self.producer_all,
+            Acks::One => &self.producer_one,
+            Acks::Zero => &self.producer_zero,
+        }
+    }
+
     async fn produce_plain(
         &self,
         rec: &GatewayRecord,
@@ -256,11 +283,7 @@ impl ProduceCore {
         acks: Acks,
     ) -> Result<RecordOutcome, GatewayError> {
         let prec = to_producer_record(rec, value);
-        let producer = match acks {
-            Acks::All => &self.producer_all,
-            Acks::One => &self.producer_one,
-            Acks::Zero => &self.producer_zero,
-        };
+        let producer = self.producer_for_acks(acks);
         let meta = producer.send(prec).await.map_err(GatewayError::Producer)?;
         Ok(RecordOutcome {
             partition: PartitionIndex(meta.partition),
