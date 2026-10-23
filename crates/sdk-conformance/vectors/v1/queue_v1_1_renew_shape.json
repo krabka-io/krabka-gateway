@@ -1,6 +1,9 @@
 {
   "id": "queue_v1_1_renew_shape",
-  "since": { "major": 1, "minor": 1 },
+  "since": {
+    "major": 1,
+    "minor": 1
+  },
   "steps": [
     {
       "name": "publish renewable queue record",
@@ -11,7 +14,11 @@
         "headers": []
       },
       "expect": {
-        "ok": { "deduplicated": false, "offset": 0, "partition": 0 }
+        "ok": {
+          "deduplicated": false,
+          "offset": 0,
+          "partition": 0
+        }
       }
     },
     {
@@ -46,20 +53,50 @@
         "cmd": "queue_renew",
         "session_id": "queue-session-1",
         "entries": [
-          { "message_id": "queue-renew:0:0" },
-          { "message_id": "missing:0:0" }
+          {
+            "message_id": "queue-renew:0:0"
+          },
+          {
+            "message_id": "missing:0:0"
+          }
         ]
       },
       "expect": {
         "ok": {
           "results": [
-            { "message_id": "queue-renew:0:0", "error": null },
+            {
+              "message_id": "queue-renew:0:0",
+              "error": null
+            },
             {
               "message_id": "missing:0:0",
               "error": {
                 "kind": "invalid_argument",
                 "message": "queue message is not acquired"
               }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "dispose renewed record before reacquiring the session",
+      "command": {
+        "cmd": "queue_acknowledge",
+        "session_id": "queue-session-1",
+        "entries": [
+          {
+            "message_id": "queue-renew:0:0",
+            "ack_type": "accept"
+          }
+        ]
+      },
+      "expect": {
+        "ok": {
+          "results": [
+            {
+              "message_id": "queue-renew:0:0",
+              "error": null
             }
           ]
         }

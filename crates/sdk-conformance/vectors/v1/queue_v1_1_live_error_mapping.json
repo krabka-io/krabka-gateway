@@ -1,6 +1,9 @@
 {
   "id": "queue_v1_1_live_error_mapping",
-  "since": { "major": 1, "minor": 1 },
+  "since": {
+    "major": 1,
+    "minor": 1
+  },
   "live_only": true,
   "steps": [
     {
@@ -17,6 +20,105 @@
         "error": {
           "kind": "invalid_argument",
           "message": "queue session expired; re-acquire"
+        }
+      }
+    },
+    {
+      "name": "publish backpressure queue record",
+      "command": {
+        "cmd": "publish",
+        "topic": "queue-live-backpressure",
+        "value_b64": "cmVuZXc=",
+        "headers": []
+      },
+      "expect": {
+        "ok": {
+          "deduplicated": false,
+          "offset": 0,
+          "partition": 0
+        }
+      }
+    },
+    {
+      "name": "acquire backpressure queue record",
+      "command": {
+        "cmd": "queue_acquire",
+        "topic": "queue-live-backpressure",
+        "group": "queue-workers",
+        "max": 1,
+        "lock_duration_ms": 30000
+      },
+      "expect": {
+        "ok": {
+          "session_id": "queue-session-1",
+          "messages": [
+            {
+              "message_id": "queue-live-backpressure:0:0",
+              "topic": "queue-live-backpressure",
+              "partition": 0,
+              "offset": 0,
+              "value_b64": "cmVuZXc=",
+              "headers": [],
+              "delivery_count": 1
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "outstanding batch rejects another acquire",
+      "command": {
+        "cmd": "queue_acquire",
+        "topic": "queue-live-backpressure",
+        "group": "queue-workers",
+        "max": 1,
+        "lock_duration_ms": 30000,
+        "session_id": "queue-session-1"
+      },
+      "expect": {
+        "error": {
+          "kind": "server_error",
+          "message": "acknowledge the outstanding queue batch before acquiring more; retry acknowledgements for expired messages or start a new session"
+        }
+      }
+    },
+    {
+      "name": "dispose renewed record before reacquiring the session",
+      "command": {
+        "cmd": "queue_acknowledge",
+        "session_id": "queue-session-1",
+        "entries": [
+          {
+            "message_id": "queue-live-backpressure:0:0",
+            "ack_type": "accept"
+          }
+        ]
+      },
+      "expect": {
+        "ok": {
+          "results": [
+            {
+              "message_id": "queue-live-backpressure:0:0",
+              "error": null
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "reacquire reuses the returned session",
+      "command": {
+        "cmd": "queue_acquire",
+        "topic": "queue-live-backpressure",
+        "group": "queue-workers",
+        "max": 1,
+        "lock_duration_ms": 30000,
+        "session_id": "queue-session-1"
+      },
+      "expect": {
+        "ok": {
+          "session_id": "queue-session-1",
+          "messages": []
         }
       }
     }
