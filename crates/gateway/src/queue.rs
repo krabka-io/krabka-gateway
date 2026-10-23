@@ -13,6 +13,7 @@ use std::{
 use axum::Extension;
 use connectrpc_axum::message::{ConnectError, ConnectRequest, ConnectResponse};
 use dashmap::DashMap;
+use futures_util::future::BoxFuture;
 use krabka_authz::AuthorizationResult;
 use krabka_client_consumer::{
     ShareAckMode, ShareAckType, ShareAcquireMode, ShareConsumer, ShareConsumerRecord,
@@ -40,13 +41,89 @@ struct QueueSession {
     group_id: String,
     topics: Vec<String>,
     consumer: Mutex<ShareConsumer>,
-    acquired: StdMutex<HashSet<QueueCoordinate>>,
+    acquired: StdMutex<QueueAcquisitions>,
     max_messages: u32,
     last_used: StdMutex<Instant>,
     _permit: OwnedSemaphorePermit,
 }
 
 type QueueCoordinate = (String, i32, i64);
+
+/// One outstanding poll batch. Broker verdicts, rather than a local lease
+/// clock, retire coordinates before the session can acquire another batch.
+#[derive(Default)]
+struct QueueAcquisitions {
+    coordinates: HashSet<QueueCoordinate>,
+}
+
+impl QueueAcquisitions {
+    fn can_poll(&self) -> bool {
+        self.coordinates.is_empty()
+    }
+
+    fn record_batch(
+        &mut self,
+        coordinates: impl IntoIterator<Item = QueueCoordinate>,
+        maximum: usize,
+    ) -> Result<(), ()> {
+        if !self.can_poll() {
+            return Err(());
+        }
+        for coordinate in coordinates {
+            if self.coordinates.len() == maximum && !self.coordinates.contains(&coordinate) {
+                return Err(());
+            }
+            self.coordinates.insert(coordinate);
+        }
+        Ok(())
+    }
+
+    fn finish(&mut self, coordinate: &QueueCoordinate) {
+        self.coordinates.remove(coordinate);
+    }
+}
+
+#[derive(Debug)]
+enum QueuePollError {
+    Outstanding,
+    Backend(krabka_client_consumer::ConsumerError),
+    LimitExceeded,
+}
+
+type QueuePollResult = Result<Vec<ShareConsumerRecord>, krabka_client_consumer::ConsumerError>;
+
+/// Keep admission and tracking in the same serialized operation as polling.
+/// The callback allows this lock boundary to be exercised without a broker.
+async fn poll_tracked_batch<C: Send>(
+    consumer: &Mutex<C>,
+    acquired: &StdMutex<QueueAcquisitions>,
+    maximum: usize,
+    poll: impl for<'a> FnOnce(&'a mut C) -> BoxFuture<'a, QueuePollResult> + Send,
+) -> Result<Vec<ShareConsumerRecord>, QueuePollError> {
+    let mut consumer = consumer.lock().await;
+    if !acquired
+        .lock()
+        .expect("queue acquired-record mutex poisoned")
+        .can_poll()
+    {
+        return Err(QueuePollError::Outstanding);
+    }
+    let records = poll(&mut consumer).await.map_err(QueuePollError::Backend)?;
+    if records.len() > maximum {
+        return Err(QueuePollError::LimitExceeded);
+    }
+    acquired
+        .lock()
+        .expect("queue acquired-record mutex poisoned")
+        .record_batch(
+            records
+                .iter()
+                .map(|record| (record.topic.clone(), record.partition, record.offset)),
+            maximum,
+        )
+        .map_err(|()| QueuePollError::LimitExceeded)?;
+    Ok(records)
+}
 
 impl QueueSession {
     fn touch(&self) {
@@ -278,7 +355,7 @@ async fn start_session(
         group_id,
         topics,
         consumer: Mutex::new(consumer),
-        acquired: StdMutex::new(HashSet::new()),
+        acquired: StdMutex::new(QueueAcquisitions::default()),
         max_messages,
         last_used: StdMutex::new(Instant::now()),
         _permit: permit,
@@ -330,6 +407,9 @@ fn validate_lock_duration(lock_duration_ms: u64) -> Result<(), String> {
 }
 
 /// Acquire up to the session's fixed message limit from a share group.
+/// One outstanding batch is retained per session. Acknowledge that batch
+/// before acquiring another; only broker disposition verdicts retire its
+/// coordinates, so local clock assumptions cannot invalidate a live lease.
 ///
 /// # Errors
 /// Returns a Connect error for invalid input, denied access, session expiry, or
@@ -384,30 +464,35 @@ pub async fn queue_acquire(
     };
 
     let wait_ms = request.wait_ms.min(MAX_WAIT_MS);
-    let records = session
-        .consumer
-        .lock()
-        .await
-        .poll(Time::from_millis(i64::from(wait_ms)))
-        .await;
+    let records = poll_tracked_batch(
+        &session.consumer,
+        &session.acquired,
+        usize::try_from(session.max_messages).expect("queue cap fits usize"),
+        move |consumer| Box::pin(consumer.poll(Time::from_millis(i64::from(wait_ms)))),
+    )
+    .await;
     let records = match records {
         Ok(records) => records,
-        Err(error) => {
+        Err(QueuePollError::Outstanding) => {
+            return Err(ConnectError::new_resource_exhausted(
+                "acknowledge the outstanding queue batch before acquiring more; \
+                 retry acknowledgements for expired messages or start a new session",
+            ));
+        }
+        Err(QueuePollError::Backend(error)) => {
             if is_new {
                 state.queue.remove(&session_id, &session);
             }
             return Err(ConnectError::new_unavailable(error.to_string()));
         }
+        Err(QueuePollError::LimitExceeded) => {
+            // Do not leave an untracked backend batch in a usable session.
+            state.queue.remove(&session_id, &session);
+            return Err(ConnectError::new_unavailable(
+                "broker exceeded the queue session's outstanding record limit; re-acquire",
+            ));
+        }
     };
-    session
-        .acquired
-        .lock()
-        .expect("queue acquired-record mutex poisoned")
-        .extend(
-            records
-                .iter()
-                .map(|record| (record.topic.clone(), record.partition, record.offset)),
-        );
     session.touch();
     Ok(ConnectResponse::new(pb::QueueAcquireResponse {
         session_id,
@@ -462,8 +547,8 @@ fn coordinate(entry: &pb::QueueAckEntry) -> QueueCoordinate {
     (entry.topic.clone(), entry.partition, entry.offset)
 }
 
-fn contains_acquired(acquired: &HashSet<QueueCoordinate>, entry: &pb::QueueAckEntry) -> bool {
-    acquired.contains(&coordinate(entry))
+fn contains_acquired(acquired: &QueueAcquisitions, entry: &pb::QueueAckEntry) -> bool {
+    acquired.coordinates.contains(&coordinate(entry))
 }
 
 fn is_acquired(session: &QueueSession, entry: &pb::QueueAckEntry) -> bool {
@@ -479,7 +564,27 @@ fn finish_acquired(session: &QueueSession, entry: &pb::QueueAckEntry) {
         .acquired
         .lock()
         .expect("queue acquired-record mutex poisoned")
-        .remove(&coordinate(entry));
+        .finish(&coordinate(entry));
+}
+
+#[derive(Clone, Copy)]
+enum QueueOperation {
+    Disposition,
+    Renew,
+}
+
+fn acknowledgement_releases_tracking(
+    error: Option<&krabka_client_consumer::ConsumerError>,
+    operation: QueueOperation,
+) -> bool {
+    // INVALID_RECORD_STATE for a disposition confirms that this member no
+    // longer holds the record. Do not apply this to Renew: a broker with
+    // renewal disabled can return the same code for a still-valid lease.
+    matches!(operation, QueueOperation::Disposition)
+        && matches!(
+            error,
+            None | Some(krabka_client_consumer::ConsumerError::Server(121))
+        )
 }
 
 async fn acknowledge_entry(
@@ -528,7 +633,7 @@ pub async fn queue_acknowledge(
                 "queue acknowledgement type is required".to_string(),
             )),
         };
-        if error.is_none() {
+        if acknowledgement_releases_tracking(error.as_ref(), QueueOperation::Disposition) {
             finish_acquired(&session, &entry);
         }
         results.push(pb::QueueAckResult {
@@ -564,14 +669,13 @@ pub async fn queue_renew(
             });
             continue;
         }
-        let error = consumer
-            .renew(&ack_record(&entry))
-            .await
-            .err()
-            .map(|error| ack_error(&error));
+        let error = consumer.renew(&ack_record(&entry)).await.err();
+        if acknowledgement_releases_tracking(error.as_ref(), QueueOperation::Renew) {
+            finish_acquired(&session, &entry);
+        }
         results.push(pb::QueueAckResult {
             entry: Some(entry),
-            error,
+            error: error.map(|error| ack_error(&error)),
         });
     }
     session.touch();
@@ -581,6 +685,164 @@ pub async fn queue_renew(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn queue_coordinate(offset: i64) -> QueueCoordinate {
+        ("jobs".to_string(), 0, offset)
+    }
+
+    #[test]
+    fn abandoned_distinct_batches_cannot_accumulate_in_one_session() {
+        let mut acquired = QueueAcquisitions::default();
+        acquired
+            .record_batch((0..500).map(queue_coordinate), 500)
+            .unwrap();
+        for offset in 500..10_000 {
+            assert2::assert!(
+                acquired
+                    .record_batch([queue_coordinate(offset)], 500)
+                    .is_err()
+            );
+            assert2::assert!(acquired.coordinates.len() == 500);
+        }
+        for offset in 0..499 {
+            acquired.finish(&queue_coordinate(offset));
+        }
+        assert2::assert!(!acquired.can_poll());
+        acquired.finish(&queue_coordinate(499));
+        assert2::assert!(
+            acquired
+                .record_batch([queue_coordinate(10_000)], 500)
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn oversized_backend_batch_cannot_grow_tracking_past_its_limit() {
+        let mut acquired = QueueAcquisitions::default();
+        assert2::assert!(
+            acquired
+                .record_batch((0..501).map(queue_coordinate), 500)
+                .is_err()
+        );
+        assert2::assert!(acquired.coordinates.len() == 500);
+    }
+
+    #[test]
+    fn dispositions_reconcile_only_success_and_definitive_ownership_loss() {
+        use krabka_client_consumer::ConsumerError;
+
+        let mut acquired = QueueAcquisitions::default();
+        acquired.record_batch([queue_coordinate(7)], 1).unwrap();
+        for error in [
+            ConsumerError::Server(6),
+            ConsumerError::CoordinatorUnavailable,
+        ] {
+            if acknowledgement_releases_tracking(Some(&error), QueueOperation::Disposition) {
+                acquired.finish(&queue_coordinate(7));
+            }
+            assert2::assert!(!acquired.can_poll());
+        }
+        let ownership_lost = ConsumerError::Server(121);
+        assert2::assert!(acknowledgement_releases_tracking(
+            Some(&ownership_lost),
+            QueueOperation::Disposition
+        ));
+        acquired.finish(&queue_coordinate(7));
+        assert2::assert!(acquired.can_poll());
+        acquired.record_batch([queue_coordinate(8)], 1).unwrap();
+        assert2::assert!(acknowledgement_releases_tracking(
+            None,
+            QueueOperation::Disposition
+        ));
+        acquired.finish(&queue_coordinate(8));
+        assert2::assert!(acquired.can_poll());
+    }
+
+    #[test]
+    fn renewal_success_or_disabled_renewal_does_not_forget_a_lease() {
+        use krabka_client_consumer::ConsumerError;
+
+        let mut acquired = QueueAcquisitions::default();
+        acquired.record_batch([queue_coordinate(7)], 1).unwrap();
+        let disabled = ConsumerError::Server(121);
+        for error in [None, Some(&disabled)] {
+            if acknowledgement_releases_tracking(error, QueueOperation::Renew) {
+                acquired.finish(&queue_coordinate(7));
+            }
+            assert2::assert!(acquired.coordinates.contains(&queue_coordinate(7)));
+        }
+    }
+
+    fn fake_queue_record() -> ShareConsumerRecord {
+        ShareConsumerRecord {
+            topic: "jobs".to_string(),
+            partition: 0,
+            offset: 7,
+            timestamp: 0,
+            timestamp_type: krabka_client_consumer::TimestampType::CreateTime,
+            key: None,
+            value: None,
+            headers: Vec::new(),
+            delivery_count: 1,
+        }
+    }
+
+    #[tokio::test]
+    async fn concurrent_acquires_cannot_poll_past_the_outstanding_batch() {
+        use std::sync::atomic::AtomicUsize;
+
+        use tokio::sync::Notify;
+
+        let consumer = Arc::new(Mutex::new(()));
+        let acquired = Arc::new(StdMutex::new(QueueAcquisitions::default()));
+        let started = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let polls = Arc::new(AtomicUsize::new(0));
+        let first = {
+            let (consumer, acquired, started, release, polls) = (
+                Arc::clone(&consumer),
+                Arc::clone(&acquired),
+                Arc::clone(&started),
+                Arc::clone(&release),
+                Arc::clone(&polls),
+            );
+            tokio::spawn(async move {
+                poll_tracked_batch(&consumer, &acquired, 1, move |_| {
+                    Box::pin(async move {
+                        polls.fetch_add(1, Ordering::SeqCst);
+                        started.notify_one();
+                        release.notified().await;
+                        Ok(vec![fake_queue_record()])
+                    })
+                })
+                .await
+            })
+        };
+        started.notified().await;
+        let second = {
+            let (consumer, acquired, polls) = (
+                Arc::clone(&consumer),
+                Arc::clone(&acquired),
+                Arc::clone(&polls),
+            );
+            tokio::spawn(async move {
+                poll_tracked_batch(&consumer, &acquired, 1, move |_| {
+                    Box::pin(async move {
+                        polls.fetch_add(1, Ordering::SeqCst);
+                        Ok(vec![fake_queue_record()])
+                    })
+                })
+                .await
+            })
+        };
+        release.notify_one();
+        assert2::assert!(first.await.unwrap().unwrap().len() == 1);
+        assert2::assert!(matches!(
+            second.await.unwrap(),
+            Err(QueuePollError::Outstanding)
+        ));
+        assert2::assert!(polls.load(Ordering::SeqCst) == 1);
+    }
 
     #[tokio::test]
     async fn queue_session_capacity_is_reserved_before_consumer_creation() {
@@ -678,7 +940,9 @@ mod tests {
 
     #[test]
     fn unknown_queue_coordinate_is_rejected_before_the_broker() {
-        let acquired = HashSet::from([("jobs".to_string(), 0, 7)]);
+        let acquired = QueueAcquisitions {
+            coordinates: HashSet::from([("jobs".to_string(), 0, 7)]),
+        };
         let known = pb::QueueAckEntry {
             topic: "jobs".to_string(),
             partition: 0,
