@@ -7,7 +7,7 @@ use std::{net::SocketAddr, sync::Arc};
 
 use axum::Extension;
 use connectrpc_axum::message::{ConnectError, ConnectRequest, ConnectResponse};
-use futures_util::{FutureExt as _, future::BoxFuture};
+use futures_util::{FutureExt as _, StreamExt as _, future::BoxFuture, stream::FuturesOrdered};
 use krabka_authz::{AuthorizationRequest, AuthorizationResult};
 use krabka_metadata::{AclOperation, ResourceType};
 use krabka_security::{AuthMethod, Principal};
@@ -270,28 +270,30 @@ const SEND_WINDOW_CAPACITY: usize = 64;
 
 /// Bounded delivery window; futures represent records already enqueued.
 struct SendWindow<T> {
-    pending: Vec<BoxFuture<'static, T>>,
+    pending: FuturesOrdered<BoxFuture<'static, T>>,
     results: Vec<T>,
 }
 
 impl<T: 'static> SendWindow<T> {
     fn new(records: usize) -> Self {
         Self {
-            pending: Vec::with_capacity(SEND_WINDOW_CAPACITY),
+            pending: FuturesOrdered::new(),
             results: Vec::with_capacity(records),
         }
     }
 
     async fn push(&mut self, delivery: BoxFuture<'static, T>) {
-        self.pending.push(delivery);
+        self.pending.push_back(delivery);
         if self.pending.len() == SEND_WINDOW_CAPACITY {
             self.drain().await;
         }
     }
 
     async fn drain(&mut self) {
-        for delivery in self.pending.drain(..) {
-            self.results.push(delivery.await);
+        // Poll all deliveries together so completion-side metrics run as each
+        // acknowledgement arrives, while yielding response values in input order.
+        while let Some(result) = self.pending.next().await {
+            self.results.push(result);
         }
     }
 }
@@ -331,6 +333,41 @@ fn send_result(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn send_window_observes_later_completion_before_slow_first_delivery() {
+        let mut window = SendWindow::new(2);
+        let (first_tx, first_rx) = tokio::sync::oneshot::channel();
+        let (later_tx, later_rx) = tokio::sync::oneshot::channel();
+        let (observed_tx, observed_rx) = tokio::sync::oneshot::channel();
+        window
+            .push(async move { first_rx.await.unwrap() }.boxed())
+            .await;
+        window
+            .push(
+                async move {
+                    let value = later_rx.await.unwrap();
+                    // Production futures observe latency at this same point,
+                    // before the completed result is returned to the window.
+                    observed_tx.send(()).unwrap();
+                    value
+                }
+                .boxed(),
+            )
+            .await;
+        let draining = tokio::spawn(async move {
+            window.drain().await;
+            window.results
+        });
+        later_tx.send(2).unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5), observed_rx)
+            .await
+            .expect("later completion must be observed before the first acknowledgement")
+            .unwrap();
+        assert2::assert!(!draining.is_finished());
+        first_tx.send(1).unwrap();
+        assert2::assert!(draining.await.unwrap() == vec![1, 2]);
+    }
 
     #[tokio::test]
     async fn send_window_enqueues_before_waiting_and_keeps_input_order() {
