@@ -255,8 +255,9 @@ impl ConsumeSession {
     ///
     /// # Errors
     ///
-    /// Returns [`GatewayError::TooManyUnacked`] when accepting an out-of-order
-    /// acknowledgement would exceed the per-partition pending cap.
+    /// Returns [`GatewayError::TooManyUnacked`] when the offset does not match
+    /// a tracked outstanding delivery. Streaming callers validate delivery
+    /// membership before recording acknowledgements.
     pub(crate) fn record_ack(
         &mut self,
         topic: &str,
