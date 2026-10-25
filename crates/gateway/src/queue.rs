@@ -807,7 +807,7 @@ mod tests {
                 Arc::clone(&polls),
             );
             tokio::spawn(async move {
-                poll_tracked_batch(&consumer, &acquired, 1, move |_| {
+                poll_tracked_batch(&consumer, &acquired, 1, move |()| {
                     Box::pin(async move {
                         polls.fetch_add(1, Ordering::SeqCst);
                         started.notify_one();
@@ -826,7 +826,7 @@ mod tests {
                 Arc::clone(&polls),
             );
             tokio::spawn(async move {
-                poll_tracked_batch(&consumer, &acquired, 1, move |_| {
+                poll_tracked_batch(&consumer, &acquired, 1, move |()| {
                     Box::pin(async move {
                         polls.fetch_add(1, Ordering::SeqCst);
                         Ok(vec![fake_queue_record()])
