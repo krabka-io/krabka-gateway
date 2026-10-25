@@ -204,13 +204,13 @@ impl crate::codec::RecordCodec for SchemaRegistryCodec {
             });
         }
 
-        let (id, rest) = super::wire::decode_frame_bytes(value)?;
+        let (id, rest) = super::wire::decode_frame_bytes(&value)?;
         let (schema_str, fmt) = self.client.by_id(id).await?;
 
         // Protobuf carries a message-index prefix after the header; strip it
         // before deserialization.
         let payload = if fmt == SchemaFormat::Protobuf {
-            super::wire::strip_proto_index_bytes(rest)?
+            super::wire::strip_proto_index_bytes(&rest)?
         } else {
             rest
         };

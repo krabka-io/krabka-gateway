@@ -182,6 +182,7 @@ SIBLING_MEMBERS = {
     "krabka-client-streams": "crates/client-streams",
     "krabka-compression": "crates/compression",
     "krabka-format": "crates/format",
+    "krabka-java-regex": "crates/java-regex",
     "krabka-hlc": "crates/hlc",
     "krabka-ids": "crates/ids",
     "krabka-kafka-tap": "crates/kafka-tap",

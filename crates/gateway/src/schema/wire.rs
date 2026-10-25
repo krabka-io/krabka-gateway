@@ -52,8 +52,8 @@ pub fn decode_frame(bytes: &[u8]) -> Result<(i32, Vec<u8>), CodecError> {
 ///
 /// # Errors
 /// Rejects a short header or a magic byte other than zero.
-pub fn decode_frame_bytes(bytes: Bytes) -> Result<(i32, Bytes), CodecError> {
-    let id = frame_schema_id(&bytes)?;
+pub fn decode_frame_bytes(bytes: &Bytes) -> Result<(i32, Bytes), CodecError> {
+    let id = frame_schema_id(bytes)?;
     Ok((id, bytes.slice(5..)))
 }
 
@@ -91,8 +91,8 @@ pub fn strip_proto_index(payload: &[u8]) -> Result<Vec<u8>, CodecError> {
 ///
 /// # Errors
 /// Rejects truncated or overflowing message-index varints.
-pub fn strip_proto_index_bytes(payload: Bytes) -> Result<Bytes, CodecError> {
-    let start = proto_payload_start(&payload)?;
+pub fn strip_proto_index_bytes(payload: &Bytes) -> Result<Bytes, CodecError> {
+    let start = proto_payload_start(payload)?;
     Ok(payload.slice(start..))
 }
 
@@ -205,14 +205,14 @@ mod tests {
                 }
                 expected.extend_from_slice(payload);
                 assert2::assert!(frame.as_ref() == expected);
-                let (id, remainder) = decode_frame_bytes(frame.clone()).unwrap();
+                let (id, remainder) = decode_frame_bytes(&frame).unwrap();
                 assert2::assert!(id == 7);
                 assert2::assert!(remainder.as_ref() == &frame[5..]);
                 if !remainder.is_empty() {
                     assert2::assert!(remainder.as_ptr() == frame[5..].as_ptr());
                 }
                 let decoded = if format == SchemaFormat::Protobuf {
-                    strip_proto_index_bytes(remainder).unwrap()
+                    strip_proto_index_bytes(&remainder).unwrap()
                 } else {
                     remainder
                 };
@@ -235,14 +235,14 @@ mod tests {
             (vec![0x82, 0, 0x83, 0, 0x85, 0], 6),
         ] {
             let bytes = Bytes::from([prefix.as_slice(), b"data"].concat());
-            let decoded = strip_proto_index_bytes(bytes.clone()).unwrap();
+            let decoded = strip_proto_index_bytes(&bytes).unwrap();
             assert2::assert!(decoded.as_ref() == b"data");
             assert2::assert!(decoded.as_ptr() == bytes[payload_start..].as_ptr());
             assert2::assert!(decoded.as_ref() == strip_proto_index(&bytes).unwrap());
         }
         for bytes in [vec![], vec![0x80], vec![2, 3], vec![0x80; 10]] {
             let expected = strip_proto_index(&bytes).unwrap_err().to_string();
-            let actual = strip_proto_index_bytes(Bytes::from(bytes))
+            let actual = strip_proto_index_bytes(&Bytes::from(bytes))
                 .unwrap_err()
                 .to_string();
             assert2::assert!(actual == expected);
@@ -277,7 +277,7 @@ mod tests {
         ] {
             assert2::assert!(matches!(decode_frame(input), Err(CodecError::Framing(_))));
             assert2::assert!(
-                decode_frame_bytes(Bytes::copy_from_slice(input))
+                decode_frame_bytes(&Bytes::copy_from_slice(input))
                     .unwrap_err()
                     .to_string()
                     == decode_frame(input).unwrap_err().to_string()
