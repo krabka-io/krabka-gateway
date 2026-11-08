@@ -29,7 +29,7 @@ fn anon() -> krabka_security::Principal {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn duplicate_idempotency_key_produces_once() {
     use bytes::Bytes;
-    use krabka_client_admin::{AdminClient, CreateTopicSpec};
+    use krabka_client_admin::{AdminClient, AdminClientLike as _, CreateTopicSpec};
     use krabka_client_consumer::{AutoOffsetReset, Consumer, IsolationLevel};
     use krabka_gateway::{
         codec::RawCodec,
@@ -222,7 +222,7 @@ async fn concurrent_duplicates_produce_once() {
     use std::collections::BTreeMap;
 
     use bytes::Bytes;
-    use krabka_client_admin::{AdminClient, CreateTopicSpec};
+    use krabka_client_admin::{AdminClient, AdminClientLike as _, CreateTopicSpec};
     use krabka_client_consumer::{AutoOffsetReset, Consumer, IsolationLevel};
     use krabka_gateway::{
         codec::RawCodec,

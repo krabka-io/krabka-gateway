@@ -16,7 +16,9 @@ use std::{
 
 use bytes::Bytes;
 use krabka_broker::{Broker, BrokerConfig, BrokerHandle};
-use krabka_client_admin::{AdminClient, CreateTopicSpec, TopicMutationOptions};
+use krabka_client_admin::{
+    AdminClient, AdminClientLike as _, CreateTopicSpec, TopicMutationOptions,
+};
 use krabka_client_consumer::{AutoOffsetReset, Consumer, IsolationLevel};
 use krabka_gateway::{
     codec::RawCodec,

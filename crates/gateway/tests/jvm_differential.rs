@@ -12,7 +12,7 @@ use std::{
 
 use bytes::Bytes;
 use krabka_broker::{Broker, BrokerConfig, BrokerHandle, config::ListenerSpec};
-use krabka_client_admin::{AdminClient, CreateTopicSpec};
+use krabka_client_admin::{AdminClient, AdminClientLike as _, CreateTopicSpec};
 use krabka_gateway::{codec::RawCodec, produce::ProduceCore, types::GatewayRecord};
 use krabka_security::ListenerProtocol;
 use tokio::sync::oneshot;

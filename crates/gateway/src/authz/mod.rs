@@ -10,7 +10,7 @@ use std::sync::Arc;
 use arc_swap::ArcSwap;
 pub use auth_layer::{BearerValidator, anonymous, resolve_principal};
 use krabka_authz::{AclCache, Authorizer};
-use krabka_client_admin::AdminClient;
+use krabka_client_admin::{AdminClient, AdminClientLike as _};
 use krabka_units::prelude::*;
 use tokio_util::sync::CancellationToken;
 

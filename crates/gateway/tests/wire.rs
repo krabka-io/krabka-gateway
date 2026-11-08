@@ -17,7 +17,7 @@ use axum::{
 };
 use connectrpc_axum::message::{ConnectRequest, ConnectResponse};
 use krabka_broker::{Broker, BrokerConfig, BrokerHandle};
-use krabka_client_admin::{AdminClient, CreateTopicSpec};
+use krabka_client_admin::{AdminClient, AdminClientLike as _, CreateTopicSpec};
 use krabka_gateway::{
     codec::RawCodec,
     config::GatewayConfig,

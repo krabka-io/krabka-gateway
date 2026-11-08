@@ -9,7 +9,7 @@ use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
 use bytes::Bytes;
 use krabka_broker::{Broker, BrokerConfig, BrokerHandle};
-use krabka_client_admin::{AdminClient, CreateTopicSpec};
+use krabka_client_admin::{AdminClient, AdminClientLike as _, CreateTopicSpec};
 use krabka_client_consumer::{AutoOffsetReset, Consumer, IsolationLevel};
 use krabka_gateway::{
     codec::RawCodec,

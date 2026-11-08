@@ -88,6 +88,10 @@ allow-git = [
     "https://github.com/krabka-io/krabka-rebalancer",
     "https://github.com/krabka-io/krabka-schema-registry",
     "https://github.com/krabka-io/krabka-streams-rs",
+    # krabka-broker's `log_write_back` imports `fs::sync_file_range`, which
+    # rustix has only through bytecodealliance/rustix#1718. Drop this when a
+    # rustix release carries it.
+    "https://github.com/robot-head/rustix",
 ]
 
 [[licenses.clarify]]
