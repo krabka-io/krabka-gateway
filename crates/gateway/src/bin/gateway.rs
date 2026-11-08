@@ -284,6 +284,13 @@ struct Args {
     /// `RawCodec`.
     #[arg(long, env = "KRABKA_GATEWAY_SCHEMA_REGISTRY_URL")]
     schema_registry_url: Option<String>,
+
+    /// Google Cloud project whose Cloud Trace holds the gateway's traces. With
+    /// it set and OTLP export on, a log entry written inside a traced span
+    /// links to its trace in Cloud Logging. Unset, entries carry no trace keys.
+    /// The broker reads the same variable.
+    #[arg(long, env = "KRABKA_GCP_PROJECT_ID")]
+    gcp_project_id: Option<String>,
 }
 
 // ── main ───────────────────────────────────────────────────────────────────────
@@ -309,6 +316,7 @@ async fn main() -> anyhow::Result<()> {
         "krabka_gateway=info,info",
         "info,gateway::audit=debug",
         "krabka-gateway",
+        args.gcp_project_id.clone(),
     )
     .expect("telemetry init");
     info!(
@@ -1371,6 +1379,46 @@ mod tests {
             build_schema_registry_codec("http://localhost:8081", &runtime).expect("valid URL");
 
         assert!(codec.frame_raw);
+    }
+
+    #[test]
+    fn gcp_project_id_reads_environment_and_prefers_cli() {
+        let _guard = ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .expect("environment lock");
+
+        for (env, flag, expected) in [
+            (None, None, None),
+            (Some("env-project"), None, Some("env-project")),
+            (
+                None,
+                Some("--gcp-project-id=cli-project"),
+                Some("cli-project"),
+            ),
+            (
+                Some("env-project"),
+                Some("--gcp-project-id=cli-project"),
+                Some("cli-project"),
+            ),
+        ] {
+            temp_env::with_var("KRABKA_GCP_PROJECT_ID", env, || {
+                let args = Args::try_parse_from(
+                    [
+                        "krabka-gateway",
+                        "--bootstrap-servers=localhost:9092",
+                        "--advertised-addr=localhost:9500",
+                    ]
+                    .into_iter()
+                    .chain(flag),
+                )
+                .expect("parse gcp project id");
+                check!(
+                    args.gcp_project_id.as_deref() == expected,
+                    "env {env:?}, flag {flag:?}"
+                );
+            });
+        }
     }
 
     #[test]

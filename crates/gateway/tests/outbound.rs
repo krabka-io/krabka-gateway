@@ -40,7 +40,7 @@ use axum::{
 use bytes::Bytes;
 use hmac::{Hmac, KeyInit, Mac};
 use krabka_broker::{Broker, BrokerConfig, BrokerHandle};
-use krabka_client_admin::{AdminClient, CreateTopicSpec};
+use krabka_client_admin::{AdminClient, AdminClientLike as _, CreateTopicSpec};
 use krabka_client_core::Client;
 use krabka_client_producer::{Acks, Producer, ProducerRecord};
 use krabka_gateway::{

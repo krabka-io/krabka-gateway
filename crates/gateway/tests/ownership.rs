@@ -10,7 +10,7 @@ use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
 use bytes::Bytes;
 use krabka_broker::{Broker, BrokerConfig, BrokerHandle};
-use krabka_client_admin::{AdminClient, CreateTopicSpec};
+use krabka_client_admin::{AdminClient, AdminClientLike as _, CreateTopicSpec};
 use krabka_gateway::{
     codec::RawCodec,
     dedup::{DedupEngine, partition_for, store::DedupStore, topic::ensure_dedup_topic},

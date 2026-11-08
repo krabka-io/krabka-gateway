@@ -383,7 +383,9 @@ mod tests {
         use axum::Extension;
         use connectrpc_axum::message::ConnectRequest;
         use krabka_broker::{Broker, BrokerConfig};
-        use krabka_client_admin::{AdminClient, CreateTopicSpec, TopicMutationOptions};
+        use krabka_client_admin::{
+            AdminClient, AdminClientLike as _, CreateTopicSpec, TopicMutationOptions,
+        };
         use krabka_client_producer::{Acks, Producer};
         use tokio_util::sync::CancellationToken;
 

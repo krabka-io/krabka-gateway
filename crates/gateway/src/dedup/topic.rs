@@ -5,7 +5,9 @@
 
 use std::collections::BTreeMap;
 
-use krabka_client_admin::{AdminClient, CreateTopicSpec, TopicMutationOptions};
+use krabka_client_admin::{
+    AdminClient, AdminClientLike as _, CreateTopicSpec, TopicMutationOptions,
+};
 use krabka_units::prelude::*;
 
 use crate::{config::GatewayRuntimeConfig, error::GatewayError};

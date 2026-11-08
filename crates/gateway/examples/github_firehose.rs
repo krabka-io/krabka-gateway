@@ -7,7 +7,9 @@ use std::collections::BTreeMap;
 
 use anyhow::{Result, bail};
 use clap::Parser;
-use krabka_client_admin::{AdminClient, CreateTopicSpec, TopicMutationOptions};
+use krabka_client_admin::{
+    AdminClient, AdminClientLike as _, CreateTopicSpec, TopicMutationOptions,
+};
 use krabka_client_streams::{BuiltTopology, KafkaStreams, StreamsBuilder};
 use krabka_units::prelude::*;
 use octocrab::models::webhook_events::{WebhookEvent, WebhookEventPayload, WebhookEventType};

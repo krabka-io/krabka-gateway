@@ -8,7 +8,7 @@ use bytes::Bytes;
 use connectrpc_axum::message::Streaming;
 use futures_util::StreamExt;
 use krabka_broker::{Broker, BrokerConfig, BrokerHandle};
-use krabka_client_admin::{AdminClient, CreateTopicSpec};
+use krabka_client_admin::{AdminClient, AdminClientLike as _, CreateTopicSpec};
 use krabka_client_consumer::{AutoOffsetReset, Consumer, IsolationLevel};
 use krabka_gateway::{
     codec::RawCodec, config::GatewayConfig, pb, produce::ProduceCore, state::AppState, streaming,
