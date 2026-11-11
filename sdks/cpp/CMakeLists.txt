@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.22)
-project(krabka_sdk_cpp VERSION 0.1.0 LANGUAGES CXX)
+project(krabka_sdk_cpp VERSION 0.1.1 LANGUAGES CXX)
 
 option(KRABKA_CPP_SANITIZERS "Enable ASan/UBSan" ON)
 option(KRABKA_CPP_TSAN "Enable TSan instead of ASan/UBSan" OFF)
