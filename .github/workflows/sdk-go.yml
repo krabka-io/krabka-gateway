@@ -1,9 +1,7 @@
 name: sdk-go
 
 on:
-  pull_request:
-  push:
-    branches: [main]
+  workflow_call:
   workflow_dispatch:
     inputs:
       docker_gate:

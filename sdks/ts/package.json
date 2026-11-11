@@ -1,6 +1,6 @@
 {
   "name": "@krabka/sdk",
-  "version": "0.0.0",
+  "version": "0.0.1",
   "description": "TypeScript SDK for the Krabka gateway contract v1.",
   "type": "module",
   "main": "./dist/src/index.js",
