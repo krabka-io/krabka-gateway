@@ -3,6 +3,9 @@
 # Cargo remains the dependency source of truth; Bazel reads the same
 # Cargo.toml / Cargo.lock through rules_rs (see MODULE.bazel).
 
+# Keep the pinned Ubuntu build input available during mirror outages.
+common --downloader_config=bazel/downloader.cfg
+
 # Keep the action environment hermetic so build-script outputs are reproducible.
 build --incompatible_strict_action_env
 
