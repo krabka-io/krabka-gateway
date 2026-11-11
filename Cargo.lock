@@ -4244,7 +4244,7 @@ dependencies = [
 
 [[package]]
 name = "krabka-app-sdk"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "assert2",
  "base64 0.23.1",
@@ -4681,7 +4681,7 @@ dependencies = [
 
 [[package]]
 name = "krabka-gateway"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "anyhow",
  "apache-avro",
@@ -5061,7 +5061,7 @@ dependencies = [
 
 [[package]]
 name = "krabka-sdk-conformance"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "assert2",
  "async-trait",
