@@ -1,0 +1,39 @@
+diff --git a/connectrpc-axum-build/src/gen.rs b/connectrpc-axum-build/src/gen.rs
+--- a/connectrpc-axum-build/src/gen.rs
++++ b/connectrpc-axum-build/src/gen.rs
+@@ -357,8 +357,8 @@
+                         /// Use [`MakeServiceBuilder`] to apply [`ConnectLayer`] and combine
+                         /// with other services.
+                         ///
+-                        /// [`MakeServiceBuilder`]: connectrpc_axum::MakeServiceBuilder
+-                        /// [`ConnectLayer`]: connectrpc_axum::ConnectLayer
++                        /// [`MakeServiceBuilder`]: https://github.com/krabka-io/connectrpc-axum/blob/78eaf82ed5541944e1ecad3e0169799d3f841f49/connectrpc-axum/src/service_builder.rs#L214
++                        /// [`ConnectLayer`]: https://github.com/krabka-io/connectrpc-axum/blob/78eaf82ed5541944e1ecad3e0169799d3f841f49/connectrpc-axum/src/layer/connect.rs#L58
+                         pub fn build(self) -> axum::Router<()> {
+                             self.router
+                         }
+@@ -373,8 +373,8 @@
+                         /// For custom configuration, use [`build()`] and configure
+                         /// `MakeServiceBuilder` manually.
+                         ///
+-                        /// [`MakeServiceBuilder`]: connectrpc_axum::MakeServiceBuilder
+-                        /// [`ConnectLayer`]: connectrpc_axum::ConnectLayer
++                        /// [`MakeServiceBuilder`]: https://github.com/krabka-io/connectrpc-axum/blob/78eaf82ed5541944e1ecad3e0169799d3f841f49/connectrpc-axum/src/service_builder.rs#L214
++                        /// [`ConnectLayer`]: https://github.com/krabka-io/connectrpc-axum/blob/78eaf82ed5541944e1ecad3e0169799d3f841f49/connectrpc-axum/src/layer/connect.rs#L58
+                         pub fn build_connect(self) -> axum::Router<()> {
+                             connectrpc_axum::MakeServiceBuilder::new()
+                                 .add_router(self.router)
+diff --git a/connectrpc-axum-build/src/gen/tonic.rs b/connectrpc-axum-build/src/gen/tonic.rs
+--- a/connectrpc-axum-build/src/gen/tonic.rs
++++ b/connectrpc-axum-build/src/gen/tonic.rs
+@@ -593,8 +593,8 @@
+             /// Returns the router and a gRPC service. Use [`MakeServiceBuilder`] to
+             /// apply [`ConnectLayer`] and combine with other services.
+             ///
+-            /// [`MakeServiceBuilder`]: connectrpc_axum::MakeServiceBuilder
+-            /// [`ConnectLayer`]: connectrpc_axum::ConnectLayer
++            /// [`MakeServiceBuilder`]: https://github.com/krabka-io/connectrpc-axum/blob/78eaf82ed5541944e1ecad3e0169799d3f841f49/connectrpc-axum/src/service_builder.rs#L214
++            /// [`ConnectLayer`]: https://github.com/krabka-io/connectrpc-axum/blob/78eaf82ed5541944e1ecad3e0169799d3f841f49/connectrpc-axum/src/layer/connect.rs#L58
+             pub fn build(self) -> (
+                 axum::Router,
+                 #server_mod_name::#tonic_server_type_name<#tonic_service_name>

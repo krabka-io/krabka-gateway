@@ -3,6 +3,22 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
+  pull_request:
+    paths:
+      - .github/workflows/docs-pages.yml
+      - .github/actions/**
+      - .aspect/**
+      - bazel/**
+      - crates/**
+      - Cargo.toml
+      - Cargo.lock
+      - MODULE.aspect
+      - MODULE.bazel
+      - MODULE.bazel.lock
+      - BUILD.bazel
+      - .bazelrc
+      - .bazelversion
+      - rust-toolchain.toml
 
 # Publish the rustdoc set to GitHub Pages.
 #
@@ -20,7 +36,6 @@ on:
 
 permissions:
   contents: read
-  pages: write
   # Both the Pages deployment and setup-aspect's log uploads need the OIDC
   # token, as in `ci.yml`.
   id-token: write
@@ -28,13 +43,16 @@ permissions:
 # One deployment at a time. A push that lands while one is in flight waits
 # rather than cancelling it, so the site never ends between two versions.
 concurrency:
-  group: pages
+  group: pages-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: false
 
 jobs:
   build:
-    # workflow_dispatch can run from any ref; only main may publish to Pages.
-    if: github.ref == 'refs/heads/main'
+    # Pull requests verify the archive without production deployment permissions.
+    if: github.event_name == 'pull_request' || github.ref == 'refs/heads/main'
+    permissions:
+      contents: read
+      id-token: write
     name: render rustdoc
     runs-on: ubuntu-26.04
     timeout-minutes: 45
@@ -62,13 +80,44 @@ jobs:
       - name: assemble the site
         run: aspect rustdoc-site --output site --repo krabka-gateway
 
-      - uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6.0.0
+      - if: github.ref == 'refs/heads/main'
+        uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6.0.0
+
+      # Use only staging and archive verification. Cross-site checks are separate.
+      - name: Checkout pinned packaging tools
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: krabka-io/tooling
+          ref: fd30652ceeae95fa7ee8288aa105bce6f109904f
+          path: .docs-packaging
+          sparse-checkout: actions/upload-rustdoc-pages
+          persist-credentials: false
+
+      - name: Stage public docs and linked hidden source pages
+        run: |
+          set -euo pipefail
+          staging_root="$(mktemp -d "${RUNNER_TEMP}/rustdoc-pages.XXXXXX")"
+          python3 .docs-packaging/actions/upload-rustdoc-pages/pages_site.py stage site "${staging_root}/site"
+          echo "DOCS_STAGED_PATH=${staging_root}/site" >> "${GITHUB_ENV}"
 
       - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
         with:
-          path: site
+          path: ${{ env.DOCS_STAGED_PATH }}
+          # Only selected source pages can contain hidden path segments.
+          include-hidden-files: true
+          retention-days: 1
+
+      - name: Verify final Pages archive
+        run: python3 .docs-packaging/actions/upload-rustdoc-pages/pages_site.py verify "${DOCS_STAGED_PATH}" "${RUNNER_TEMP}/artifact.tar"
+
+      # Check uploaded bytes. External destinations remain unchecked.
+      - name: Verify final archive links and assets
+        run: python3 .docs-packaging/actions/upload-rustdoc-pages/archive_links.py "${RUNNER_TEMP}/artifact.tar"
 
   deploy:
+    permissions:
+      pages: write
+      id-token: write
     # workflow_dispatch can run from any ref; only main may publish to Pages.
     if: github.ref == 'refs/heads/main'
     name: deploy to GitHub Pages

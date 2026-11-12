@@ -1,0 +1,17 @@
+diff --git a/src/lib.rs b/src/lib.rs
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -1,6 +1,7 @@
+ //! Combinators and utilities for working with `Future`s, `Stream`s, `Sink`s,
+ //! and the `AsyncRead` and `AsyncWrite` traits.
+ 
++#![doc(html_root_url = "https://docs.rs/futures-util/0.3.34/")]
+ #![no_std]
+ #![doc(test(
+     no_crate_inject,
+diff --git a/src/stream/try_stream/mod.rs b/src/stream/try_stream/mod.rs
+--- a/src/stream/try_stream/mod.rs
++++ b/src/stream/try_stream/mod.rs
+@@ -1166,1 +1166,1 @@
+-    /// Adapter that converts this stream into an [`AsyncBufRead`](crate::io::AsyncBufRead).
++    /// Adapter that converts this stream into an [`AsyncBufRead`](https://docs.rs/futures-io/0.3.34/futures_io/trait.AsyncBufRead.html).
