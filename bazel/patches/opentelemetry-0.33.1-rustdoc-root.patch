@@ -1,0 +1,11 @@
+diff --git a/src/lib.rs b/src/lib.rs
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -224,6 +224,7 @@
+ //! increased past 1.46, three minor versions prior. Increasing the minimum
+ //! supported compiler version is not considered a semver breaking change as
+ //! long as doing so complies with this policy.
++#![doc(html_root_url = "https://docs.rs/opentelemetry/0.33.1/")]
+ #![warn(
+     future_incompatible,
+     missing_debug_implementations,

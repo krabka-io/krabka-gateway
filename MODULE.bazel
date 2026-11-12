@@ -151,6 +151,69 @@ crate.from_cargo(
     platform_triples = PLATFORM_TRIPLES,
 )
 
+# These exact-version patches change documentation only, not runtime behavior.
+http_archive = use_repo_rule("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
+
+http_archive(
+    name = "krabka_doc_roots",
+    build_file_content = 'exports_files(glob(["patches/rustdoc/*.patch"]))',
+    sha256 = "17a6ba990d324d4b1294587b4039ead8aab8b44aaf4173f950480724f96dbe7b",
+    strip_prefix = "tooling-de8015a2ae144099980c6a508ef57b6809f40dfb",
+    urls = ["https://github.com/krabka-io/tooling/archive/de8015a2ae144099980c6a508ef57b6809f40dfb.tar.gz"],
+)
+
+crate.annotation(
+    crate = "tracing",
+    patch_args = ["-p1"],
+    patches = ["@krabka_doc_roots//:patches/rustdoc/tracing-0.1.44.patch"],
+    version = "0.1.44",
+)
+crate.annotation(
+    crate = "tracing-core",
+    patch_args = ["-p1"],
+    patches = ["@krabka_doc_roots//:patches/rustdoc/tracing-core-0.1.36.patch"],
+    version = "0.1.36",
+)
+crate.annotation(
+    crate = "yansi",
+    patch_args = ["-p1"],
+    patches = ["@krabka_doc_roots//:patches/rustdoc/yansi-1.0.1.patch"],
+    version = "1.0.1",
+)
+
+# Resolve inherited FutureExt links through its exact published crate root.
+crate.annotation(
+    crate = "opentelemetry",
+    patch_args = ["-p1"],
+    patches = ["//bazel/patches:opentelemetry-0.33.1-rustdoc-root.patch"],
+    version = "0.33.1",
+)
+
+# Resolve inherited stream documentation using its published version.
+crate.annotation(
+    crate = "futures-util",
+    patch_args = ["-p1"],
+    patches = ["//bazel/patches:futures-util-0.3.34-rustdoc-root.patch"],
+    version = "0.3.34",
+)
+
+# Resolve inherited stream documentation using its published version.
+crate.annotation(
+    crate = "futures-core",
+    patch_args = ["-p1"],
+    patches = ["//bazel/patches:futures-core-0.3.34-rustdoc-root.patch"],
+    version = "0.3.34",
+)
+
+# Link generated type references to their pinned source definitions.
+# This git revision has no published API documentation for these types.
+crate.annotation(
+    crate = "connectrpc-axum-build",
+    patch_args = ["-p1"],
+    patches = ["//bazel/patches:connectrpc-axum-build-0.2.5-rustdoc-references.patch"],
+    version = "0.2.5",
+)
+
 # cargo-mutants comes from its own lockfile rather than this workspace's, so the
 # sweep tool is pinned independently of what the crates under test depend on.
 crate.from_cargo(
